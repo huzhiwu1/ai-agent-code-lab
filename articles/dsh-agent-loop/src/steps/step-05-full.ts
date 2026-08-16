@@ -1,16 +1,16 @@
 /**
- * SimplifiedReactLoop – 复现 DeepSeek Harness Agent 主循环核心机制
+ * Step 05 – 完整版：整合 step-01~04 的所有机制
  *
- * 源码参考：source/packages/core/agent-loop/src/agent.ts
- *   - ReactLoopAgent 类、turn()/step() 双层循环、Inbox 系统、工具调用
+ * 这是《从 0 实现一遍 Agent 主循环》渐进教程的最终版：
+ *   step-01 最小骨架：turn/step 双层循环（无工具）
+ *   step-02 加工具：模型开始声明 tool_calls（不执行）
+ *   step-03 执行工具 + 结果回填 + 多 step 循环（闭环）
+ *   step-04 加状态机：max-tokens 粘性 + 错误 + 取消
+ *   step-05 完整版：Inbox 消息队列 + 诊断信息 + 完整 TurnEndReason（本文件）
  *
- * 本文件是简化版教学实现，用真实 LLM（ChatOpenAI + bindTools）演示核心流程：
- *   1. turn/step 双层循环
- *   2. 上下文组装（system prompt + 消息序列）
- *   3. LLM 流式生成 + tool-calls 解析
- *   4. 工具并发调度（此处简化串行，注释说明生产是并发）
- *   5. 工具结果回填 + 再调 LLM
- *   6. turn 结束状态机
+ * 建议按顺序跑：pnpm run step:01 → step:02 → ... → step:05
+ *
+ * 跑法：pnpm run run:dsh-loop（或 pnpm run step:05）
  */
 
 import 'dotenv/config'

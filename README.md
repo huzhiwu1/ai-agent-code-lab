@@ -1,8 +1,8 @@
 # DeepSeek Harness 源码精读（ai-agent-code-lab）
 
-**DeepSeek Harness 源码精读系列**：解析文档（Markdown）+ 简化版复现代码（TypeScript，真实 LLM 可运行），pnpm monorepo 管理。
+**DeepSeek Harness 源码精读系列**：解析文档（Markdown）+ **渐进式从 0 复现代码**（TypeScript，真实 LLM 可运行），pnpm monorepo + ESLint/Prettier 管理。
 
-DeepSeek Harness（v0.1.0-rc.5，2026-08-13 开源，MIT）是 DeepSeek 官方的 Agent 运行时框架，Cordis 插件元框架，"一切皆插件"。本系列从源码出发拆解其核心机制，并用简化版复现验证理解——每个简化版代码的注释都标注了对应源码位置。
+DeepSeek Harness（v0.1.0-rc.5，2026-08-13 开源，MIT）是 DeepSeek 官方的 Agent 运行时框架，Cordis 插件元框架，"一切皆插件"。本系列从源码出发拆解其核心机制，并**从 0 开始一步步实现一遍**验证理解——每个简化版代码的注释都标注了对应源码位置。
 
 > 💡 **注意**：AI Agent 通用知识文章（记忆管理、上下文工程等）的代码示例在另一个仓库：[ai-agent-code-examples](https://github.com/huzhiwu1/ai-agent-code-examples)。
 
@@ -14,11 +14,19 @@ DeepSeek Harness（v0.1.0-rc.5，2026-08-13 开源，MIT）是 DeepSeek 官方�
 
 > 飞书版含完整渲染的主循环全景图（mermaid），建议优先阅读。
 
-## 🧪 代码复现
+## 🧪 从 0 实现一遍：渐进式步骤
 
-| 篇目         | 代码                                                 | 跑法                    |
-| ------------ | ---------------------------------------------------- | ----------------------- |
-| Agent 主循环 | [articles/dsh-agent-loop/](articles/dsh-agent-loop/) | `pnpm run run:dsh-loop` |
+源码学习最好的方式不是直接读完整实现，而是**从最小骨架开始，一步一步把机制加回去**。本仓库把 Agent 主循环拆成 5 个渐进步骤，每步都是独立可运行的真实代码：
+
+| 步骤    | 文件名                                                                                                     | 学到什么                                              | 跑法               |
+| ------- | ---------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- | ------------------ |
+| Step 01 | [steps/step-01-minimal.ts](articles/dsh-agent-loop/src/steps/step-01-minimal.ts)                           | **最小骨架**：turn/step 双层循环（无工具）            | `pnpm run step:01` |
+| Step 02 | [steps/step-02-tools-declared.ts](articles/dsh-agent-loop/src/steps/step-02-tools-declared.ts)             | **加工具**：bindTools 让模型声明 tool_calls（不执行） | `pnpm run step:02` |
+| Step 03 | [steps/step-03-execute-and-feedback.ts](articles/dsh-agent-loop/src/steps/step-03-execute-and-feedback.ts) | **闭环**：执行工具 + ToolMessage 回填 + 多 step 往返  | `pnpm run step:03` |
+| Step 04 | [steps/step-04-state-machine.ts](articles/dsh-agent-loop/src/steps/step-04-state-machine.ts)               | **状态机**：max-tokens 粘性 + 错误处理 + 取消         | `pnpm run step:04` |
+| Step 05 | [steps/step-05-full.ts](articles/dsh-agent-loop/src/steps/step-05-full.ts)                                 | **完整版**：整合前 4 步 + Inbox 队列 + 诊断信息       | `pnpm run step:05` |
+
+每个步骤文件顶部都有「学习目标」+「对应源码位置」，跑完一步看输出，再进下一步——这就是从 0 理解主循环的路径。
 
 ## 快速开始
 
@@ -30,16 +38,25 @@ pnpm install
 # 复制环境变量模板并填写 LLM key
 cp .env.example .env
 
-# 跑示例（真实 LLM 调用，需要配置 LLM_API_KEY）
-pnpm run run:dsh-loop
+# 从 step-01 开始，一步步跑
+pnpm run step:01
+pnpm run step:02
+# ... 直到完整版
+pnpm run step:05
 ```
 
 ## 🔧 环境要求
 
 - Node.js ≥ 20
-- pnpm ≥ 9
+- pnpm ≥ 9（pnpm-workspace.yaml 管理 monorepo）
 - 任意 OpenAI 兼容的 LLM 端点（默认 DeepSeek：`https://api.deepseek.com`，也支持网关）
 - `.env` 配置：`LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL`
+
+## 🛠️ 开发工具链
+
+- **ESLint**（typescript-eslint + eslint-config-prettier）：`pnpm run lint` / `pnpm run lint:fix`
+- **Prettier**：`pnpm run format` / `pnpm run format:check`
+- **Husky + lint-staged**：pre-commit 自动 format/lint
 
 ## 📚 相关链接
 

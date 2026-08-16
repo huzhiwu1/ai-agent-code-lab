@@ -134,11 +134,109 @@ Agent 实例不是无状态跑模型的，它有一个显式状态机（`agent.t
 
 每次 turn 结束会换新的 AbortController，旧 controller 上的 latch（wakeRequested）会失效，由活着的 driver 自己 claim 队列——这是避免"唤醒信号发给已死任务"的经典并发陷阱。
 
-## 自己实现一遍：SimplifiedReactLoop
+## 自己实现一遍：从 0 开始，5 步渐进复现
 
-为了验证上面的理解，我们在 ai-agent-code-lab 里写了一个 `SimplifiedReactLoop`（约 490 行，真实 LLM + 真实工具）：
+源码学习最好的方式不是直接读 500 行完整实现，而是**从最小骨架开始，一步一步把机制加回去**——每加一个机制都对应源码里的一个真实设计。我们把 Agent 主循环拆成 5 个渐进步骤（`ai-agent-code-lab/articles/dsh-agent-loop/src/steps/`），每步都是独立可运行的真实代码：
 
-简化版忠实还原了四个关键点：turn 内 while 循环跑多 step、claim 消息、工具结果回填 inbox、无工具调用即收尾。但它和真实源码的差异必须交代清楚，否则会误导：
+### Step 01：最小骨架——只有 turn/step 双层循环（无工具）
+
+```typescript
+class MinimalLoop {
+  async turn(userInput: string): Promise<string> {
+    this.messages.push(new HumanMessage(userInput))
+    // 对应源码：turn() 内部的 while(true) 循环
+    let result: string | null = null
+    while (result === null) {
+      result = await this.step()
+    }
+    return result
+  }
+
+  private async step(): Promise<string | null> {
+    // 组 prompt → 调模型 → 拿文本
+    const result = await this.llm.invoke([systemPrompt, ...this.messages])
+    this.messages.push(result)
+    return content
+  }
+}
+```
+
+跑 `pnpm run step:01`，真实输出：
+
+```
+🔄 === Turn 开始 ===
+  ⚡ 调 LLM ...
+  📨 回答: 你好，我是简洁的AI助手，用一两句话回答你的问题。...
+🔄 === Turn 结束 ===
+最终回答: 你好，我是简洁的AI助手，用一两句话回答你的问题。
+```
+
+这一步建立最核心的直觉：**turn 管回合边界，step 管模型往返**。还没有工具、没有状态机。
+
+### Step 02：加工具——模型开始“声明”要调工具
+
+关键机制：`bindTools()` 把工具声明（名字/描述/参数 JSON Schema）塞进请求，模型就能在回答里返回 `tool_calls`。这一步**只声明不执行**——打印出模型声明的调用，让你看到工具是怎么让模型知道的。
+
+```typescript
+const toolBindings = this.buildToolBindings()
+const llmWithTools = this.llm.bindTools(toolBindings) // 关键
+const result = await llmWithTools.invoke(llmMessages)
+const toolCalls = result.tool_calls || [] // 模型返回的工具调用声明
+```
+
+### Step 03：闭环——执行工具 + 结果回填 + 多 step 往返
+
+这是 Agent 的核心魔法：
+
+```typescript
+// 模型声明要调工具 → 逐个执行
+for (const tc of toolCalls) {
+  const resultContent = await entry.execute(tc.args)
+  // 关键：ToolMessage 回填，tool_call_id 必须对上 tc.id
+  this.messages.push(new ToolMessage({ content: resultContent, tool_call_id: tc.id ?? '' }))
+}
+// 返回 null → 外层 while 继续 → 再调模型（下一轮 step）
+```
+
+真实输出（Step 1.1 并行 2 个工具 → 回填 → Step 1.2 最终回答）：
+
+```
+⚡ Step 1.1: 调 LLM (deepseek-v4-flash)
+📨 Step 1.1: finish_reason=tool_calls, tool_calls=2
+🛠️  执行工具: get_weather({"city":"北京"})
+✅ 工具结果: 📍 北京 天气：晴天，25°C，湿度 40%，微风
+🛠️  执行工具: calculator({"expression":"1+1"})
+✅ 工具结果: 计算结果: 1+1 = 2
+⚡ Step 1.2: 调 LLM (deepseek-v4-flash)
+📨 Step 1.2: finish_reason=stop, tool_calls=0
+```
+
+### Step 04：加状态机——max-tokens 粘性 + 错误 + 取消
+
+生产级 turn 需要明确的结束原因。关键设计是 **max-tokens 粘性**：
+
+```typescript
+// max-tokens 粘性：触顶过就不能被后续正常 step 降级
+function mergeTurnEnds(current, next) {
+  if (current !== null && current.kind === 'max-tokens') return current
+  return next
+}
+```
+
+### Step 05：完整版——整合前 4 步 + Inbox 队列 + 诊断
+
+最终版对应源码的全部核心机制，注释标注每个机制的源码位置（`agent.ts:245-329` 等）。
+
+### 简化 vs 真实对照
+
+| 机制      | 真实源码（Harness）                                 | 简化版（复现）                |
+| --------- | --------------------------------------------------- | ----------------------------- |
+| 消息注入  | followup / steer / inject 三种边界                  | 只实现了一个 inbox 队列       |
+| step 决策 | preStep() 先 claim + pre-step waterfall 可改写/拒绝 | 取 inbox 直接发模型，无决策点 |
+| 请求配置  | request/header 持久化 + 插件可改 + adapter defaults | 固定模型配置                  |
+| 错误处理  | request-error waterfall 可 retry                    | 直接抛错退出                  |
+| 工具执行  | 并发调度 + 模型顺序提交 + abort 排水                | 串行执行                      |
+| 事件溯源  | 每个 turn/step/chunk 写 session log，可回放         | 无持久化，纯内存              |
 
 所以简化版验证的是**流程骨架**（turn/step 双层、工具回路、收尾条件），没有验证的是**生产级细节**（并发、恢复、取消、插件介入）。想深入的同学建议直接读源码 + 跑官方测试（`agent-loop/tests/` 下有 cancel / tool-order / scope-lifecycle 等 spec）。
 

@@ -8,7 +8,12 @@
     "articles/*"
   ],
   "scripts": {
-    "run:dsh-loop": "tsx articles/dsh-agent-loop/src/index.ts",
+    "run:dsh-loop": "tsx articles/dsh-agent-loop/src/steps/step-05-full.ts",
+    "step:01": "tsx articles/dsh-agent-loop/src/steps/step-01-minimal.ts",
+    "step:02": "tsx articles/dsh-agent-loop/src/steps/step-02-tools-declared.ts",
+    "step:03": "tsx articles/dsh-agent-loop/src/steps/step-03-execute-and-feedback.ts",
+    "step:04": "tsx articles/dsh-agent-loop/src/steps/step-04-state-machine.ts",
+    "step:05": "tsx articles/dsh-agent-loop/src/steps/step-05-full.ts",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
