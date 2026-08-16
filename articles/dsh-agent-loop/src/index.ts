@@ -15,16 +15,16 @@
 
 import 'dotenv/config'
 import { ChatOpenAI } from '@langchain/openai'
-import { BaseMessage, HumanMessage, SystemMessage, AIMessage, ToolMessage } from '@langchain/core/messages'
+import { BaseMessage, HumanMessage, SystemMessage, ToolMessage } from '@langchain/core/messages'
 
 // ─── 类型定义 ────────────────────────────────────────────────────────
 
 /** Turn 结束原因，对应 agent.ts 中的 TurnEndReason */
 type TurnEndReason =
-  | { kind: 'completed' }       // 无工具调用，正常结束
-  | { kind: 'max-tokens' }      // 模型输出触顶
-  | { kind: 'aborted' }         // 被取消
-  | { kind: 'error'; error: Error }  // 异常
+  | { kind: 'completed' } // 无工具调用，正常结束
+  | { kind: 'max-tokens' } // 模型输出触顶
+  | { kind: 'aborted' } // 被取消
+  | { kind: 'error'; error: Error } // 异常
 
 /** 工具注册表中的条目 */
 interface ToolEntry {
@@ -143,7 +143,7 @@ class SimplifiedReactLoop {
     }
     // 返回最终回答
     const lastMsg = [...this.messages].reverse().find(m => m._getType() === 'ai')
-    return lastMsg?.content as string ?? '(无回答)'
+    return (lastMsg?.content as string) ?? '(无回答)'
   }
 
   /**
@@ -221,8 +221,8 @@ class SimplifiedReactLoop {
       // 以及 assembleContextFor() 组装消息上下文
       const systemPrompt = new SystemMessage(
         '你是一个 AI Agent，可以调用工具来完成任务。' +
-        '当用户需要查询天气或进行计算时，请使用对应的工具。' +
-        '如果用户同时提出多个请求，你可以一次性调用多个工具（并行）。'
+          '当用户需要查询天气或进行计算时，请使用对应的工具。' +
+          '如果用户同时提出多个请求，你可以一次性调用多个工具（并行）。',
       )
 
       // 准备消息列表（system + 历史）
@@ -232,9 +232,7 @@ class SimplifiedReactLoop {
       // 对应 agent.ts: const { request, preparedCall } = await this.buildRequest(...)
       // 其中 tools 来自 assembly.tools
       const toolBindings = this.buildToolBindings()
-      const llmWithTools = toolBindings.length > 0
-        ? this.llm.bindTools(toolBindings)
-        : this.llm
+      const llmWithTools = toolBindings.length > 0 ? this.llm.bindTools(toolBindings) : this.llm
 
       // ── 调用 LLM 流式生成 ──
       // 对应 agent.ts: const stream = preparedCall?.stream(request) ?? this.loopCtx.llm.stream(request)
@@ -243,14 +241,18 @@ class SimplifiedReactLoop {
       // 这里用简洁方式：非流式调用，但注释说明生产是流式
       // 对应 agent.ts: for await (const chunk of stream) { assembler.push(chunk) }
       const result = await llmWithTools.invoke(llmMessages)
-      const finishReason = result.response_metadata?.finish_reason || 'stop'
+      const finishReason: string =
+        ((result.response_metadata as Record<string, unknown> | undefined)
+          ?.finish_reason as string) ?? 'stop'
 
       // ── 解析 tool-calls ──
       // 对应 agent.ts: const toolCalls = message.content.filter(block => block.type === 'tool-call')
       const toolCalls = result.tool_calls || []
 
-      console.log(`  📨 Step ${this.turnNumber}.${this.stepNumber}: ` +
-        `finish_reason=${finishReason}, tool_calls=${toolCalls.length}`)
+      console.log(
+        `  📨 Step ${this.turnNumber}.${this.stepNumber}: ` +
+          `finish_reason=${finishReason}, tool_calls=${toolCalls.length}`,
+      )
 
       // 记录诊断信息
       this.diagnostics.push({
@@ -258,7 +260,10 @@ class SimplifiedReactLoop {
         step: this.stepNumber,
         toolCalls: toolCalls.length,
         finishReason,
-        tokensUsed: result.response_metadata?.usage?.total_tokens,
+        tokensUsed: (
+          (result.response_metadata as Record<string, unknown> | undefined)?.usage as
+            Record<string, unknown> | undefined
+        )?.total_tokens as number | undefined,
       })
 
       // ── 处理结束条件 ──
@@ -291,7 +296,6 @@ class SimplifiedReactLoop {
 
         const entry = this.tools.get(toolName)
         let resultContent: string
-        let isError = false
 
         if (entry) {
           try {
@@ -299,20 +303,20 @@ class SimplifiedReactLoop {
             resultContent = await entry.execute(toolArgs)
           } catch (e: unknown) {
             resultContent = `Error: ${e instanceof Error ? e.message : String(e)}`
-            isError = true
           }
         } else {
           resultContent = `Error: 未知工具 "${toolName}"`
-          isError = true
         }
 
         // 将工具结果作为 ToolMessage 加入会话历史
         // 对应 agent.ts: appendToolResult(session, turn, step, block, result)
         // 工具结果通过 acceptContext 回调回填到 next-step inbox
-        this.messages.push(new ToolMessage({
-          content: resultContent,
-          tool_call_id: tc.id ?? '',
-        }))
+        this.messages.push(
+          new ToolMessage({
+            content: resultContent,
+            tool_call_id: tc.id ?? '',
+          }),
+        )
 
         console.log(`  ✅ 工具结果: ${resultContent.substring(0, 80)}`)
       }
@@ -321,7 +325,6 @@ class SimplifiedReactLoop {
       // 对应 agent.ts: return concluded ? { kind: 'completed' } : null
       // null 表示继续 step 循环（再调 LLM）
       return null as unknown as TurnEndReason
-
     } catch (e: unknown) {
       // 对应 agent.ts: the catch in turn() that wraps errors
       if (this.aborted) return { kind: 'aborted' }
@@ -382,12 +385,12 @@ const weatherTool: ToolEntry = {
     const city = (args.city as string) || '未知城市'
     // 模拟不同城市返回不同天气
     const weathers: Record<string, string> = {
-      '北京': '晴天，25°C，湿度 40%，微风',
-      '上海': '多云，28°C，湿度 65%，东南风 3级',
-      '广州': '阵雨，32°C，湿度 80%，南风 2级',
-      '深圳': '晴天，30°C，湿度 70%，微风',
-      '杭州': '阴天，26°C，湿度 75%，东北风 2级',
-      '成都': '多云，24°C，湿度 60%，西北风 1级',
+      北京: '晴天，25°C，湿度 40%，微风',
+      上海: '多云，28°C，湿度 65%，东南风 3级',
+      广州: '阵雨，32°C，湿度 80%，南风 2级',
+      深圳: '晴天，30°C，湿度 70%，微风',
+      杭州: '阴天，26°C，湿度 75%，东北风 2级',
+      成都: '多云，24°C，湿度 60%，西北风 1级',
     }
     const weather = weathers[city] || `晴天，22°C，湿度 50%`
     return `📍 ${city} 天气：${weather}`
@@ -475,9 +478,11 @@ async function main() {
     console.log('╚══════════════════════════════════════════════════════════════╝')
     console.log()
     for (const d of loop.diagnostics) {
-      console.log(`  Turn ${d.turn}, Step ${d.step}: ` +
-        `tool_calls=${d.toolCalls}, finish=${d.finishReason}` +
-        (d.tokensUsed ? `, tokens=${d.tokensUsed}` : ''))
+      console.log(
+        `  Turn ${d.turn}, Step ${d.step}: ` +
+          `tool_calls=${d.toolCalls}, finish=${d.finishReason}` +
+          (d.tokensUsed ? `, tokens=${d.tokensUsed}` : ''),
+      )
     }
     console.log()
     console.log('✅ 主循环演示完成')
