@@ -1,0 +1,18 @@
+{
+  "name": "ai-agent-code-lab",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AI Agent 知识文章的代码示例库（monorepo，每篇文章一个独立包）",
+  "workspaces": [
+    "articles/*"
+  ],
+  "scripts": {
+    "run:memory": "tsx articles/agent-memory/src/index.ts",
+    "run:context-eng": "tsx articles/context-eng/src/index.ts"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "dotenv": "^17.4.2"
+  }
+}
