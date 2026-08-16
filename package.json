@@ -2,13 +2,12 @@
   "name": "ai-agent-code-lab",
   "version": "1.0.0",
   "private": true,
-  "description": "AI Agent 知识文章的代码示例库（monorepo，每篇文章一个独立包）",
+  "description": "DeepSeek Harness 源码精读系列：解析文档 + 简化版复现代码（pnpm monorepo）",
+  "packageManager": "pnpm@11.18.0",
   "workspaces": [
     "articles/*"
   ],
   "scripts": {
-    "run:memory": "tsx articles/agent-memory/src/index.ts",
-    "run:context-eng": "tsx articles/context-eng/src/index.ts",
     "run:dsh-loop": "tsx articles/dsh-agent-loop/src/index.ts"
   },
   "devDependencies": {
