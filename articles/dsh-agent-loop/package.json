@@ -1,0 +1,16 @@
+{
+  "name": "@articles/dsh-agent-loop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "简化版 ReactLoop – 复现 DeepSeek Harness Agent 主循环核心机制",
+  "main": "src/index.ts",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "run:dsh-loop": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@langchain/core": "^1.2.1",
+    "@langchain/openai": "^1.5.3",
+    "dotenv": "^17.4.2"
+  }
+}

@@ -19,39 +19,12 @@ dotenv.config({ path: path.resolve(__dirname, "../../../.env") });
 dotenv.config();
 import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 import { MemoryVectorStore } from "@langchain/classic/vectorstores/memory";
-import { Embeddings } from "@langchain/core/embeddings";
+import { OpenAIEmbeddings } from "@langchain/openai";
 import { Document } from "@langchain/core/documents";
 import { SystemMessage, HumanMessage } from "@langchain/core/messages";
 import { ChatOpenAI } from "@langchain/openai";
-
-// ───────── 自定义 Embedding 类（生产环境请换 OpenAIEmbeddings） ─────────
-class SimpleEmbeddings extends Embeddings {
-  private dim: number;
-  constructor(params?: { dim?: number }) {
-    super(params || {});
-    this.dim = params?.dim || 256;
-  }
-
-  private textToVector(text: string): number[] {
-    const vec = new Array(this.dim).fill(0);
-    const lower = text.toLowerCase();
-    // 字符级 bigram 哈希 + 频率累加
-    for (let i = 0; i < lower.length - 1; i++) {
-      const hash = (lower.charCodeAt(i) * 31 + lower.charCodeAt(i + 1)) % this.dim;
-      vec[hash] += 1;
-    }
-    // L2 归一化
-    const mag = Math.sqrt(vec.reduce((s, v) => s + v * v, 0)) || 1;
-    return vec.map((v) => v / mag);
-  }
-
-  async embedQuery(text: string): Promise<number[]> {
-    return this.textToVector(text);
-  }
-  async embedDocuments(texts: string[]): Promise<number[][]> {
-    return texts.map((t) => this.textToVector(t));
-  }
-}
+import { trimMessages } from "@langchain/core/messages";
+import { getEncoding } from "js-tiktoken";
 
 // ───────── 知识库文档（10 篇电商主题） ─────────
 const KNOWLEDGE_BASE = [
@@ -133,28 +106,20 @@ function isRelevant(pageContent: string, keywords: string[]): boolean {
   return keywords.some((kw) => pageContent.includes(kw));
 }
 
-/** 语义边界裁剪：在不超过 maxLen 字符的前提下，在最近的句子边界处截断 */
-function truncateAtSentence(text: string, maxLen: number): string {
-  if (text.length <= maxLen) return text;
-  const slice = text.slice(0, maxLen);
-  // 找最后一个句子结束符（按中文/英文句子边界）
-  const sentenceEnders = /[。！？!?.]\n?/g;
-  let lastMatch: RegExpExecArray | null = null;
-  let match: RegExpExecArray | null;
-  while ((match = sentenceEnders.exec(slice)) !== null) {
-    lastMatch = match;
-  }
-  if (lastMatch && lastMatch.index + lastMatch[0].length > maxLen * 0.3) {
-    // 如果有句子边界在最后 70% 范围内，用那个位置
-    return slice.slice(0, lastMatch.index + lastMatch[0].length).trimEnd() + "\n…[截断]";
-  }
-  // 没有合适的句子边界，在最后一个完整标点处截断
-  const lastPunct = /[，,；;]\s*[^，,；;。！？!?.]*$/.exec(slice);
-  if (lastPunct && lastPunct.index > maxLen * 0.3) {
-    return slice.slice(0, lastPunct.index).trimEnd() + "\n…[截断]";
-  }
-  // 兜底：直接截断加标记
-  return text.slice(0, maxLen).trimEnd() + "\n…[截断]";
+/** 生产级裁剪：按精确 token 预算裁剪，保留消息尾部（最新信息优先） */
+const enc = getEncoding("cl100k_base");
+
+async function trimChunk(chunk: string, maxTokens: number): Promise<string> {
+  const msg = new HumanMessage(chunk);
+  const trimmed = await trimMessages([msg], {
+    maxTokens,
+    strategy: "last",  // 保留尾部（最近信息优先）
+    tokenCounter: (msgs) =>
+      msgs.reduce((sum, m) => sum + enc.encode(typeof m.content === "string" ? m.content : JSON.stringify(m.content)).length, 0),
+    includeSystem: false,
+    allowPartial: true,
+  });
+  return typeof trimmed[0].content === "string" ? trimmed[0].content : chunk;
 }
 
 // ───────── 主流程 ─────────
@@ -182,7 +147,16 @@ async function main() {
   console.log(`   chunk 大小分布: ${chunks.map((c) => c.pageContent.length).join(", ")} 字符`);
 
   // ── 2. 向量化 + 检索 ──
-  const embeddings = new SimpleEmbeddings({ dim: 256 });
+  // 生产级 Embedding：阿里云 DashScope（OpenAI 兼容端点），text-embedding-v3
+// key 配置：仓库根 .env 的 EMBEDDING_API_KEY / EMBEDDING_BASE_URL / EMBEDDING_MODEL
+const embeddings = new OpenAIEmbeddings({
+  apiKey: process.env.EMBEDDING_API_KEY ?? process.env.API_KEY,
+  model: process.env.EMBEDDING_MODEL ?? "text-embedding-v3",
+  batchSize: 10,  // DashScope 单批上限 10 条
+  configuration: {
+    baseURL: process.env.EMBEDDING_BASE_URL ?? "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  },
+});
   const vectorStore = await MemoryVectorStore.fromDocuments(chunks, embeddings);
 
   const QUESTION = "我的订单 ORD-20260815-001 发货 3 天了，想退货，退款多久能到账？";
@@ -216,12 +190,12 @@ async function main() {
   const medMessages = [medSystem, medHuman];
 
   // 策略 C：好 —— top-k 筛选 + 语义边界裁剪 + 截断标记
-  const MAX_CHUNK_CHARS = 100;
-  const goodChunks = medChunks.map((r) => ({
+  const MAX_CHUNK_TOKENS = 60;  // 生产：按精确 token 预算裁剪
+  const goodChunks = await Promise.all(medChunks.map(async (r) => ({
     doc: r[0],
     score: r[1],
-    truncated: truncateAtSentence(r[0].pageContent, MAX_CHUNK_CHARS),
-  }));
+    truncated: await trimChunk(r[0].pageContent, MAX_CHUNK_TOKENS),
+  })));
   const goodContext = goodChunks
     .map((r, i) => `【${i + 1}】${r.truncated}`)
     .join("\n\n");

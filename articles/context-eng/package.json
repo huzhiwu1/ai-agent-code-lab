@@ -13,6 +13,7 @@
     "@langchain/core": "^1.2.1",
     "@langchain/classic": "^1.0.38",
     "@langchain/textsplitters": "^1.0.1",
-    "dotenv": "^17.4.2"
+    "dotenv": "^17.4.2",
+    "js-tiktoken": "^1.0.15"
   }
 }

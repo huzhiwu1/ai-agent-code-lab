@@ -8,7 +8,8 @@
   ],
   "scripts": {
     "run:memory": "tsx articles/agent-memory/src/index.ts",
-    "run:context-eng": "tsx articles/context-eng/src/index.ts"
+    "run:context-eng": "tsx articles/context-eng/src/index.ts",
+    "run:dsh-loop": "tsx articles/dsh-agent-loop/src/index.ts"
   },
   "devDependencies": {
     "tsx": "^4.19.0",
