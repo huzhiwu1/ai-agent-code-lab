@@ -136,9 +136,9 @@ Agent 实例不是无状态跑模型的，它有一个显式状态机（`agent.t
 
 每次 turn 结束会换新的 AbortController，旧 controller 上的 latch（wakeRequested）会失效，由活着的 driver 自己 claim 队列——这是避免"唤醒信号发给已死任务"的经典并发陷阱。
 
-## 自己实现一遍：从 0 开始，5 步渐进复现
+## 自己实现一遍：从 0 开始，7 步渐进复现
 
-源码学习最好的方式不是直接读 500 行完整实现，而是**从最小骨架开始，一步一步把机制加回去**——每加一个机制都对应源码里的一个真实设计。我们把 Agent 主循环拆成 5 个渐进步骤（`ai-agent-code-lab/articles/dsh-agent-loop/src/steps/`），每步都是独立可运行的真实代码：
+源码学习最好的方式不是直接读 500 行完整实现，而是**从最小骨架开始，一步一步把机制加回去**——每加一个机制都对应源码里的一个真实设计。我们把 Agent 主循环拆成 7 个渐进步骤（`ai-agent-code-lab/articles/dsh-agent-loop/src/steps/`），每步都是独立可运行的真实代码：
 
 ### Step 01：最小骨架——只有 turn/step 双层循环（无工具）
 
@@ -146,23 +146,29 @@ Agent 实例不是无状态跑模型的，它有一个显式状态机（`agent.t
 
 这一步建立最核心的直觉：**turn 管回合边界，step 管模型往返**。还没有工具、没有状态机。
 
-### Step 02：加工具——模型开始“声明”要调工具
+### Step 02：工具声明——模型开始"声明"要调工具
 
 关键机制：`bindTools()` 把工具声明（名字/描述/参数 JSON Schema）塞进请求，模型就能在回答里返回 `tool_calls`。这一步**只声明不执行**——打印出模型声明的调用，让你看到工具是怎么让模型知道的。
 
-### Step 03：闭环——执行工具 + 结果回填 + 多 step 往返
+### Step 03：工具闭环——执行工具 + 结果回填 + 多 step 往返
 
-这是 Agent 的核心魔法：
+这是 Agent 的核心魔法：Step 1 模型返回 tool_calls → 执行工具 → 结果作为 ToolMessage 回填 → Step 2 模型看到结果后给出最终回答。
 
-真实输出（Step 1.1 并行 2 个工具 → 回填 → Step 1.2 最终回答）：
+### Step 04：结束状态机——max-tokens 粘性 + 错误 + 取消
 
-### Step 04：加状态机——max-tokens 粘性 + 错误 + 取消
+生产级 turn 需要明确的结束原因。关键设计是 **max-tokens 粘性**：一旦某个 step 触顶，后续正常 step 不能把 turn 结果降级回 completed。
 
-生产级 turn 需要明确的结束原因。关键设计是 **max-tokens 粘性**：
+### Step 05：外部驱动 + Phase 状态机——谁启动 Agent？什么时候能跑？
 
-### Step 05：完整版——整合前 4 步 + Inbox 队列 + 诊断
+Agent 不是无状态死循环。Phase 状态机（idle ↔ running）管理 Agent 生命周期，kick/wake 提供外部驱动入口，latch 机制处理取消收敛窗口的唤醒信号。
 
-最终版对应源码的全部核心机制，注释标注每个机制的源码位置（`agent.ts:245-329` 等）。
+### Step 06：preStep 决策点——每步开始前先决策
+
+插件可以在每个 step 开始前改写或拒绝这一步的输入。claim 后消息不可逆——即使 reject 也不退回 inbox。preStep 和 inject 的本质区别：inject 影响"后续 step"，preStep 影响"当前 step"。
+
+### Step 07：完整版——整合前 6 步 + 三种消息注入 + 诊断
+
+最终版对应源码的全部核心机制，包括 followup/steer/inject 三种消息注入、preStep 拦截器、诊断信息收集。注释标注每个机制的源码位置（`agent.ts:245-329` 等）。
 
 ### 简化 vs 真实对照
 

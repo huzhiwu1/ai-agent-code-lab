@@ -1,7 +1,10 @@
 /**
- * Step 05 – preStep 决策点：每步开始前先决策
+ * Step 06 – preStep 决策点：每步开始前先决策
  *
  * 学习目标：理解 preStep() 为什么是"当前步的决策入口"而非"注入"。
+ *
+ * 前置依赖：Step 05 的 Phase 状态机 + 外部驱动。
+ * 本步在 Phase 基础上，为每个 step 插入决策点——插件可以改写或拒绝这一步的输入。
  *
  * 对应源码 agent.ts:225-243 的 preStep()：
  *   1. inbox.claim() → 原子取走消息批次
@@ -13,7 +16,7 @@
  *   - preStep 和 inject 的分界：inject 影响"后续 step"，preStep 影响"当前 step"
  *   - 完整消息批次只经过一次 preStep 决策
  *
- * 跑法：pnpm run step:05
+ * 跑法：pnpm run step:06
  */
 
 import 'dotenv/config'
@@ -22,7 +25,11 @@ import { BaseMessage, HumanMessage, SystemMessage, ToolMessage } from '@langchai
 
 // ─── 类型定义 ────────────────────────────────────────────────────────
 
-/** Turn 结束原因，对应 agent.ts 的 TurnEndReason */
+/**
+ * Turn 结束原因。
+ * 真实定义在 packages/core/session/src/types.ts（agent.ts 是使用方）；
+ * 本步新增 blocked（preStep 拒绝）；interrupted 仅崩溃恢复层使用，教学版省略。
+ */
 type TurnEndReason =
   | { kind: 'completed' }
   | { kind: 'max-tokens' }
@@ -209,7 +216,13 @@ class PreStepAgent {
     return (lastMsg?.content as string) ?? '(无回答)'
   }
 
-  private async executeStep(): Promise<TurnEndReason> {
+  /**
+   * 一次 step：调模型 → 工具回路 → 返回结束原因。
+   *
+   * 返回 null 表示"工具结果已回填，需要继续循环再调模型"，
+   * 由 run() 的 while 循环处理。
+   */
+  private async executeStep(): Promise<TurnEndReason | null> {
     try {
       const systemPrompt = new SystemMessage(
         '你是一个 AI Agent，可以调用工具完成任务。当用户需要查询天气或计算时，调用对应工具。',
@@ -260,8 +273,8 @@ class PreStepAgent {
         this.messages.push(new ToolMessage({ content: resultContent, tool_call_id: tc.id ?? '' }))
       }
 
-      // 工具结果已回填，继续循环
-      return null as unknown as TurnEndReason
+      // 工具结果已回填 → 返回 null，由 run() 继续循环
+      return null
     } catch (e: unknown) {
       if (this.aborted) return { kind: 'aborted' }
       return { kind: 'error', error: e instanceof Error ? e : new Error(String(e)) }
@@ -284,7 +297,7 @@ class PreStepAgent {
 
 async function main() {
   console.log('╔══════════════════════════════════════════════════════════════╗')
-  console.log('║  Step 05 – preStep 决策点：claim + waterfall + reject       ║')
+  console.log('║  Step 06 – preStep 决策点：claim + waterfall + reject       ║')
   console.log('╚══════════════════════════════════════════════════════════════╝')
   console.log()
 
@@ -326,7 +339,8 @@ async function main() {
 
   // 注册 preStep 拦截器：如果消息包含"机密"则拒绝
   agent2.onPreStep(decision => {
-    const hasSensitive = decision.messages.some(m => {
+    if (decision.kind === 'reject') return decision
+    const hasSensitive = decision.messages.some((m: BaseMessage) => {
       const text = typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
       return text.includes('机密')
     })

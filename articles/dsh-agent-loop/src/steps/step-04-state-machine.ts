@@ -1,11 +1,17 @@
 /**
- * Step 04 – 加结束状态机：max-tokens 粘性、错误处理、取消
+ * Step 04 – 结束状态机：max-tokens 粘性、错误处理、取消
  *
  * 学习目标：理解生产级 turn 结束原因为什么重要。
  *
- * 对应源码 agent.ts：
- *   - TurnEndReason 联合类型：completed / max-tokens / aborted / error / blocked
- *   - max-tokens 粘性：一旦某 step 触顶，后续正常 step 不能把 turn 结果降级回 completed
+ * 前置依赖：Step 03 的工具闭环（工具声明 + 执行 + 回填 + 多 step 往返）。
+ * 本步在闭环基础上，为 turn 加明确的结束状态——不再只是"答完就结束"。
+ *
+ * 对应源码：
+ *   - TurnEndReason 联合类型 → packages/core/session/src/types.ts
+ *     （真实枚举含 6 个成员；本步先实现 4 个：blocked 在 Step 06 随 preStep 引入，
+ *     interrupted 是崩溃恢复层专用、主循环从不发出，教学版省略）
+ *   - max-tokens 粘性 → agent.ts:285-290
+ *     （一旦某 step 触顶，后续正常 step 不能把 turn 结果降级回 completed）
  *   - AbortController：取消信号贯穿 turn/step/工具执行
  *
  * 关键机制：
@@ -20,7 +26,13 @@ import 'dotenv/config'
 import { ChatOpenAI } from '@langchain/openai'
 import { BaseMessage, HumanMessage, SystemMessage, ToolMessage } from '@langchain/core/messages'
 
-/** Turn 结束原因，对应 agent.ts 的 TurnEndReason */
+/**
+ * Turn 结束原因。
+ * 真实定义在 packages/core/session/src/types.ts（agent.ts 是使用方）；
+ * 真实枚举含 6 个成员，教学版简化如下：
+ *   - blocked 在 Step 06 随 preStep 引入
+ *   - interrupted 仅崩溃恢复层使用，主循环从不发出，教学版省略
+ */
 type TurnEndReason =
   | { kind: 'completed' }
   | { kind: 'max-tokens' } // 输出触顶（粘性）
@@ -139,8 +151,13 @@ class StatefulLoop {
     return turnEnds ?? { kind: 'completed' }
   }
 
-  /** 一次 step：调模型 → 工具回路 → 返回结束原因 */
-  private async step(): Promise<TurnEndReason> {
+  /**
+   * 一次 step：调模型 → 工具回路 → 返回结束原因。
+   *
+   * 返回 null 表示"工具结果已回填，需要继续循环再调模型"，
+   * 由 turn() 的 while 循环处理。
+   */
+  private async step(): Promise<TurnEndReason | null> {
     try {
       const systemPrompt = new SystemMessage(
         '你是一个 AI Agent，可以调用工具完成任务。当用户需要查询天气或计算时，调用对应工具。',
@@ -194,13 +211,9 @@ class StatefulLoop {
         this.messages.push(new ToolMessage({ content: resultContent, tool_call_id: tc.id ?? '' }))
       }
 
-      // 工具结果已回填 → 返回 null 语义：继续循环。
-      // 但我们的状态机里用一个哨兵值表示"继续"——用 error 里的特殊标志不可取，
-      // 所以这里直接返回 completed 会让 turn 提前结束？不对——
-      // 真实源码 step() 返回 null 表示继续。
-      // 处理：返回一个"中间态"——用 max-tokens 之外的方式。
-      // 简化：这里返回 null，由 turn() 判断 null = 继续循环。
-      return null as unknown as TurnEndReason
+      // 工具结果已回填 → 返回 null 表示"继续循环"
+      // 对应源码：step() 返回 null 表示继续，由 turn() 的 while(true) 处理
+      return null
     } catch (e: unknown) {
       if (this.aborted) return { kind: 'aborted' }
       return { kind: 'error', error: e instanceof Error ? e : new Error(String(e)) }
