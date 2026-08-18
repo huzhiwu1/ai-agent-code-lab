@@ -49,6 +49,15 @@ interface ToolEntry {
   execute: (args: Record<string, unknown>) => Promise<string>
 }
 
+/**
+ * 单 turn 最大 step 数（安全阀）。
+ * 注意：真实 harness 没有硬编码 step 上限——turn 终止靠数据（工具结果 concludesTurn）、
+ * 策略（agent/pre-step 拦截器 reject → blocked）、取消（abort）三类机制。
+ * 教学版因真实 LLM 行为不可控，加显式上限防演示死循环；
+ * 若想更贴近真实模式，可把它改为注册在 onPreStep() 的拦截器（超限 reject）。
+ */
+const MAX_STEPS_PER_TURN = 8
+
 // ─── PreStepAgent ────────────────────────────────────────────────────
 
 /**
@@ -175,6 +184,13 @@ class PreStepAgent {
       while (true) {
         if (this.aborted) {
           turnEnds = { kind: 'aborted' }
+          break
+        }
+
+        // 安全阀：step 数超限 → blocked 结束 turn，防止死循环
+        // 注意：真实 harness 无此上限；教学版用显式检查模拟一个 preStep 拦截器超限 reject
+        if (stepNumber > MAX_STEPS_PER_TURN) {
+          turnEnds = { kind: 'blocked' }
           break
         }
 

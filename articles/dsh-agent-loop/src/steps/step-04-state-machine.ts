@@ -13,6 +13,7 @@
  *   - max-tokens 粘性 → agent.ts:285-290
  *     （一旦某 step 触顶，后续正常 step 不能把 turn 结果降级回 completed）
  *   - AbortController：取消信号贯穿 turn/step/工具执行
+ *     （本步简化为 boolean 标志位，真正的 AbortController 在 Step 05 引入）
  *
  * 关键机制：
  *   - finish_reason === 'length' 表示输出触顶（截断）
@@ -45,6 +46,14 @@ interface ToolEntry {
   parameters: Record<string, unknown>
   execute: (args: Record<string, unknown>) => Promise<string>
 }
+
+/**
+ * 单 turn 最大 step 数（安全阀）。
+ * 注意：真实 harness 没有硬编码 step 上限——turn 终止靠数据（工具结果 concludesTurn）、
+ * 策略（agent/pre-step 拦截器 reject）、取消（abort）三类机制。
+ * 教学版因真实 LLM 行为不可控，加显式上限防止演示死循环，非真实机制。
+ */
+const MAX_STEPS_PER_TURN = 8
 
 /**
  * max-tokens 粘性合并：
@@ -107,43 +116,47 @@ class StatefulLoop {
    *     if (turnEnds === null || turnEnds.kind !== 'max-tokens') turnEnds = stepEnd  ← 粘性
    *     if (turnEnds && inbox.nextStep.length === 0) break
    *   }
+   *
+   * 注意：step() 返回 null（工具回填）→ continue 再调模型；
+   * 返回非 null（completed/max-tokens/aborted/error）→ 直接结束 turn。
+   * 没有多余的补跑逻辑——补跑会引入重复回答，甚至死循环。
    */
   async turn(userInput: string): Promise<TurnEndReason> {
     this.messages.push(new HumanMessage(userInput))
     console.log('\n🔄 === Turn 开始 ===\n')
 
     let turnEnds: TurnEndReason | null = null
-
-    // 工具回填后需要再跑一步的标记
-    let needAnotherStep = false
+    let stepCount = 0
 
     while (true) {
+      // 取消标志位：cancel() 后当前循环检查到就结束 turn
       if (this.aborted) {
         turnEnds = { kind: 'aborted' }
+        break
+      }
+
+      // 安全阀：step 数超限 → 结束 turn，防止死循环
+      // 注意：真实 harness 无此上限，靠工具结果 concludesTurn / pre-step 拒绝 / 取消终止
+      stepCount++
+      if (stepCount > MAX_STEPS_PER_TURN) {
+        turnEnds = {
+          kind: 'error',
+          error: new Error(`达到单 turn 最大 step 数上限 (${MAX_STEPS_PER_TURN})`),
+        }
         break
       }
 
       const stepEnd = await this.step()
 
       // step() 返回 null 表示“工具结果已回填，需要再调一次模型”
-      if (stepEnd === null) {
-        needAnotherStep = true
-        continue
-      }
+      if (stepEnd === null) continue
 
       // max-tokens 粘性：触顶过就不能被降级
       // 对应源码: if (turnEnds === null || turnEnds.kind !== 'max-tokens') turnEnds = stepEnd
       // 用辅助函数避免 TS 控制流收窄问题（stepEnd 可能是 null=待继续）
-      const merged = mergeTurnEnds(turnEnds, stepEnd)
-      turnEnds = merged
+      turnEnds = mergeTurnEnds(turnEnds, stepEnd)
 
-      // completed 且有工具回填待消化 → 继续循环
-      if (needAnotherStep && turnEnds?.kind === 'completed') {
-        needAnotherStep = false
-        continue
-      }
-
-      // 其他情况（completed 无待处理 / max-tokens / aborted / error）→ 结束 turn
+      // 有明确结束原因 → 结束 turn
       break
     }
 

@@ -56,6 +56,15 @@ interface StepDiagnostic {
   tokensUsed?: number
 }
 
+/**
+ * 单 turn 最大 step 数（安全阀）。
+ * 注意：真实 harness 没有硬编码 step 上限——turn 终止靠数据（工具结果 concludesTurn）、
+ * 策略（agent/pre-step 拦截器 reject → blocked）、取消（abort）三类机制。
+ * 教学版因真实 LLM 行为不可控，加显式上限防演示死循环；
+ * 若想更贴近真实模式，可把它改为注册在 onPreStep() 的拦截器（超限 reject）。
+ */
+const MAX_STEPS_PER_TURN = 8
+
 // ─── SimplifiedReactLoop ─────────────────────────────────────────────
 
 /**
@@ -254,6 +263,13 @@ class SimplifiedReactLoop {
         signal.throwIfAborted()
         phase.step++
 
+        // 安全阀：step 数超限 → blocked 结束 turn，防止死循环
+        // 注意：真实 harness 无此上限；教学版用显式检查模拟一个 preStep 拦截器超限 reject
+        if (phase.step > MAX_STEPS_PER_TURN) {
+          turnEnds = { kind: 'blocked' }
+          break
+        }
+
         // ═══ preStep 决策点 ═══
         const decision = await this.preStep(target, phase.turn, phase.step)
         if (decision.kind === 'reject') {
@@ -313,7 +329,10 @@ class SimplifiedReactLoop {
       const llmWithTools = toolBindings.length > 0 ? this.llm.bindTools(toolBindings) : this.llm
 
       console.log(`  ⚡ Step ${turn}.${step}: 调 LLM (${this.modelName})`)
-      const result = await llmWithTools.invoke(llmMessages)
+      // 把当前 turn 的 abort signal 传给 LLM 调用——
+      // 否则 cancel() 只能等请求自然结束，取消不会真正生效
+      const signal = this.phase.kind === 'running' ? this.phase.abort.signal : undefined
+      const result = await llmWithTools.invoke(llmMessages, { signal })
 
       const finishReason: string =
         ((result.response_metadata as Record<string, unknown> | undefined)

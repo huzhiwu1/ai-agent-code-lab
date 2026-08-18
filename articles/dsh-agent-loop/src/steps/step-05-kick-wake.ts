@@ -67,6 +67,14 @@ interface ToolEntry {
 }
 
 /**
+ * 单 turn 最大 step 数（安全阀）。
+ * 注意：真实 harness 没有硬编码 step 上限——turn 终止靠数据（工具结果 concludesTurn）、
+ * 策略（agent/pre-step 拦截器 reject）、取消（abort）三类机制。
+ * 教学版因真实 LLM 行为不可控，加显式上限防止演示死循环，非真实机制。
+ */
+const MAX_STEPS_PER_TURN = 8
+
+/**
  * max-tokens 粘性合并：
  *   - turnEnds 已触顶（max-tokens）→ 保持触顶，不被后续正常 step 降级
  *   - 否则用当前 step 的结果
@@ -228,13 +236,8 @@ class PhaseAwareAgent {
     phase.step = 0
     console.log(`\n🔄 === Turn ${phase.turn} 开始 ===\n`)
 
-    // 消费 inbox 中的消息，加入会话历史
-    // 对应 agent.ts preStep() 的 inbox.claim()
-    while (this.inbox.length > 0) {
-      this.messages.push(this.inbox.shift()!)
-    }
-
     let turnEnds: TurnEndReason | null = null
+    let stepCount = 0
 
     try {
       // 对应 agent.ts: while(true) { step → check break }
@@ -243,6 +246,27 @@ class PhaseAwareAgent {
         if (signal.aborted) {
           turnEnds = { kind: 'aborted' }
           break
+        }
+
+        // 安全阀：step 数超限 → 结束 turn，防止死循环
+        // 注意：真实 harness 无此上限，靠工具结果 concludesTurn / pre-step 拒绝 / 取消终止
+        stepCount++
+        if (stepCount > MAX_STEPS_PER_TURN) {
+          turnEnds = {
+            kind: 'error',
+            error: new Error(`达到单 turn 最大 step 数上限 (${MAX_STEPS_PER_TURN})`),
+          }
+          break
+        }
+
+        // 每个 step 前先消费 inbox 中新到的消息批次。
+        // turn 进行中到达的消息（如场景 3 的 latch 消息）在这里被
+        // 当前 turn 的下一个 step 消费——等价于真实 harness 的
+        // steer（next-step）语义。Step 06 会把这个 claim 升级为
+        // preStep 决策点（claim + waterfall + reject）。
+        // 对应 agent.ts preStep() 的 inbox.claim()
+        while (this.inbox.length > 0) {
+          this.messages.push(this.inbox.shift()!)
         }
 
         phase.step++
@@ -301,8 +325,11 @@ class PhaseAwareAgent {
       const toolBindings = this.buildToolBindings()
       const llmWithTools = toolBindings.length > 0 ? this.llm.bindTools(toolBindings) : this.llm
 
+      // 把当前 turn 的 abort signal 传给 LLM 调用——
+      // 否则 cancel() 只能等请求自然结束，取消不会真正生效
+      const signal = this.phase.kind === 'running' ? this.phase.abort.signal : undefined
       console.log(`  ⚡ 调 LLM ...`)
-      const result = await llmWithTools.invoke(llmMessages)
+      const result = await llmWithTools.invoke(llmMessages, { signal })
 
       const finishReason: string =
         ((result.response_metadata as Record<string, unknown> | undefined)
@@ -440,8 +467,8 @@ async function main() {
 
   await new Promise(resolve => setTimeout(resolve, 8000))
 
-  // ── 场景 3：latch 演示（发送消息时驱动还在跑） ──
-  console.log('\n--- 场景 3：latch 演示 ---\n')
+  // ── 场景 3：turn 进行中到达的消息（latch） ──
+  console.log('\n--- 场景 3：turn 进行中到达的消息（latch） ---\n')
   const agent3 = new PhaseAwareAgent()
   agent3.registerTool({
     name: 'get_weather',
@@ -457,9 +484,12 @@ async function main() {
   console.log('👤 用户: 查北京天气')
   agent3.send('查北京天气')
 
-  // 在第一个 turn 还没跑完时再发一条消息
-  // 此时 phase 为 running，wakeDriver() 会 latch 唤醒信号
-  // 等第一个 turn 跑完后 kick() 的 finally 块会重放 latch
+  // 在第一个 turn 还没跑完时再发一条消息。
+  // 此时 phase 为 running，wakeDriver() 会 latch 唤醒信号（wakeRequested = true）。
+  // 这条消息不会被丢弃：turn 循环的每个 step 前都会 claim inbox，
+  // 它会被当前 turn 的下一个 step 消费（等价于真实 harness 的 steer 语义），
+  // turn 结束后 latch 标志复位，不会重放。
+  // （真实 harness 里 followup/steer 分流是 Step 07 的 next-turn/next-step 主题）
   await new Promise(resolve => setTimeout(resolve, 2000))
   console.log('👤 用户（latch）: 再查一下上海天气')
   agent3.send('再查一下上海天气')

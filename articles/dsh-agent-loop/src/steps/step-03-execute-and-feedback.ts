@@ -36,6 +36,14 @@ interface ToolEntry {
   execute: (args: Record<string, unknown>) => Promise<string>
 }
 
+/**
+ * 单 turn 最大 step 数（安全阀）。
+ * 注意：真实 harness 没有硬编码 step 上限——turn 终止靠数据（工具结果 concludesTurn）、
+ * 策略（agent/pre-step 拦截器 reject）、取消（abort）三类机制。
+ * 教学版因真实 LLM 行为不可控，加显式上限防止演示死循环，非真实机制。
+ */
+const MAX_STEPS_PER_TURN = 8
+
 class ClosedLoop {
   private messages: BaseMessage[] = []
   private tools: Map<string, ToolEntry> = new Map()
@@ -75,7 +83,15 @@ class ClosedLoop {
 
     // 对应源码 turn() 的 while(true)：step 循环直到 completed
     let finalAnswer: string | null = null
+    let stepCount = 0
     while (finalAnswer === null) {
+      // 安全阀：step 数超限 → 强制结束，防止 LLM 反复声明工具调用导致死循环
+      // 注意：真实 harness 无此上限，靠工具结果 concludesTurn / pre-step 拒绝 / 取消终止
+      stepCount++
+      if (stepCount > MAX_STEPS_PER_TURN) {
+        finalAnswer = `(达到单 turn 最大 step 数上限 ${MAX_STEPS_PER_TURN}，强制结束)`
+        break
+      }
       finalAnswer = await this.step()
     }
 

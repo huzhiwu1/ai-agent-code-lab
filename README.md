@@ -16,15 +16,17 @@ DeepSeek Harness（v0.1.0-rc.5，2026-08-13 开源，MIT）是 DeepSeek 官方�
 
 ## 🧪 从 0 实现一遍：渐进式步骤
 
-源码学习最好的方式不是直接读完整实现，而是**从最小骨架开始，一步一步把机制加回去**。本仓库把 Agent 主循环拆成 5 个渐进步骤，每步都是独立可运行的真实代码：
+源码学习最好的方式不是直接读完整实现，而是**从最小骨架开始，一步一步把机制加回去**。本仓库把 Agent 主循环拆成 7 个渐进步骤，每步都是独立可运行的真实代码：
 
-| 步骤    | 文件名                                                                                                     | 学到什么                                              | 跑法               |
-| ------- | ---------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- | ------------------ |
-| Step 01 | [steps/step-01-minimal.ts](articles/dsh-agent-loop/src/steps/step-01-minimal.ts)                           | **最小骨架**：turn/step 双层循环（无工具）            | `pnpm run step:01` |
-| Step 02 | [steps/step-02-tools-declared.ts](articles/dsh-agent-loop/src/steps/step-02-tools-declared.ts)             | **加工具**：bindTools 让模型声明 tool_calls（不执行） | `pnpm run step:02` |
-| Step 03 | [steps/step-03-execute-and-feedback.ts](articles/dsh-agent-loop/src/steps/step-03-execute-and-feedback.ts) | **闭环**：执行工具 + ToolMessage 回填 + 多 step 往返  | `pnpm run step:03` |
-| Step 04 | [steps/step-04-state-machine.ts](articles/dsh-agent-loop/src/steps/step-04-state-machine.ts)               | **状态机**：max-tokens 粘性 + 错误处理 + 取消         | `pnpm run step:04` |
-| Step 05 | [steps/step-05-full.ts](articles/dsh-agent-loop/src/steps/step-05-full.ts)                                 | **完整版**：整合前 4 步 + Inbox 队列 + 诊断信息       | `pnpm run step:05` |
+| 步骤    | 文件名                                                                                                     | 学到什么                                                 | 跑法               |
+| ------- | ---------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- | ------------------ |
+| Step 01 | [steps/step-01-minimal.ts](articles/dsh-agent-loop/src/steps/step-01-minimal.ts)                           | **最小骨架**：turn/step 双层循环（无工具）               | `pnpm run step:01` |
+| Step 02 | [steps/step-02-tools-declared.ts](articles/dsh-agent-loop/src/steps/step-02-tools-declared.ts)             | **工具声明**：bindTools 让模型声明 tool_calls（不执行）  | `pnpm run step:02` |
+| Step 03 | [steps/step-03-execute-and-feedback.ts](articles/dsh-agent-loop/src/steps/step-03-execute-and-feedback.ts) | **工具闭环**：执行工具 + ToolMessage 回填 + 多 step 往返 | `pnpm run step:03` |
+| Step 04 | [steps/step-04-state-machine.ts](articles/dsh-agent-loop/src/steps/step-04-state-machine.ts)               | **结束状态机**：max-tokens 粘性 + 错误处理 + 取消        | `pnpm run step:04` |
+| Step 05 | [steps/step-05-kick-wake.ts](articles/dsh-agent-loop/src/steps/step-05-kick-wake.ts)                       | **外部驱动 + Phase**：kick/wake + idle↔running + latch   | `pnpm run step:05` |
+| Step 06 | [steps/step-06-pre-step.ts](articles/dsh-agent-loop/src/steps/step-06-pre-step.ts)                         | **preStep 决策点**：claim + waterfall + reject           | `pnpm run step:06` |
+| Step 07 | [steps/step-07-full.ts](articles/dsh-agent-loop/src/steps/step-07-full.ts)                                 | **完整版**：整合前 6 步 + 三种消息注入 + 诊断            | `pnpm run step:07` |
 
 每个步骤文件顶部都有「学习目标」+「对应源码位置」，跑完一步看输出，再进下一步——这就是从 0 理解主循环的路径。
 
@@ -42,7 +44,7 @@ cp .env.example .env
 pnpm run step:01
 pnpm run step:02
 # ... 直到完整版
-pnpm run step:05
+pnpm run step:07
 ```
 
 ## 🔧 环境要求
