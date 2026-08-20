@@ -84,7 +84,11 @@ async function execute(exec: ToolExec): Promise<ToolResult> {
       return { isError: true, content: `Error: render failed: ${String(error)}` }
     }
   }
-  let result = await wrappers.reduceRight((next, wrap) => () => wrap(exec, next), body)()
+  // 显式标注 next 类型，帮 TS 选中带 initialValue 的 reduceRight 重载
+  let result = await wrappers.reduceRight(
+    (next: () => Promise<ToolResult>, wrap) => () => wrap(exec, next),
+    body,
+  )()
 
   // ⑤ post-execute：统一后处理（替换内容 / 阻止）
   result = postHooks.reduce((r, hook) => hook(exec, r), result)
@@ -122,3 +126,6 @@ main().catch(error => {
   console.error(error)
   process.exit(1)
 })
+
+// 使本文件成为 ES 模块：每个 step 自包含，避免与其它 step 共享 TS 全局作用域
+export {}

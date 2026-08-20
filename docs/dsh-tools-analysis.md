@@ -263,8 +263,10 @@ type PostToolDecision =
 
 ## 自己实现一遍：一个 100 行的最小六段管线
 
-> 📦 **可运行版**：本文配套的 7 步渐进式复现已放到 `articles/dsh-tools/`（ai-agent-code-lab 仓库），`pnpm install` 后逐个跑：
-> `pnpm run step:01`（最小管线）→ `step:02`（参数物化）→ `step:03`（权限瀑布）→ `step:04`（单调守卫）→ `step:05`（取消）→ `step:06`（超时）→ `step:07`（并行调度）。纯 Node 实现，不需要 API key。
+> 📦 **可运行版**：本文配套的 7 步渐进式复现已放到 `articles/dsh-tools/`（ai-agent-code-lab 仓库），纯 Node 实现，不需要 API key。跑法二选一：
+>
+> - 根目录：`pnpm run tools:step:01`（最小管线）→ `tools:step:02`（参数物化）→ `tools:step:03`（权限瀑布）→ `tools:step:04`（单调守卫）→ `tools:step:05`（取消）→ `tools:step:06`（超时）→ `tools:step:07`（并行调度）；完整版 `pnpm run run:dsh-tools`
+> - 或在 `articles/dsh-tools/` 目录内：`pnpm run step:01` ~ `step:07`（根目录的 `step:01` ~ `step:07` 属于 dsh-agent-loop 系列）
 
 理解了原理，先用 100 行实现一个**最小可用**的执行管线（不带 Cordis 瀑布，用数组模拟插件），把六段结构跑一遍：
 
