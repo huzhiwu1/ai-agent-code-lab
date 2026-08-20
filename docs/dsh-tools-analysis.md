@@ -263,7 +263,10 @@ type PostToolDecision =
 
 ## 自己实现一遍：一个 100 行的最小六段管线
 
-理解了原理，我们用 100 行实现一个**最小可用**的执行管线（不带 Cordis 瀑布，用数组模拟插件），把六段结构跑一遍：
+> 📦 **可运行版**：本文配套的 7 步渐进式复现已放到 `articles/dsh-tools/`（ai-agent-code-lab 仓库），`pnpm install` 后逐个跑：
+> `pnpm run step:01`（最小管线）→ `step:02`（参数物化）→ `step:03`（权限瀑布）→ `step:04`（单调守卫）→ `step:05`（取消）→ `step:06`（超时）→ `step:07`（并行调度）。纯 Node 实现，不需要 API key。
+
+理解了原理，先用 100 行实现一个**最小可用**的执行管线（不带 Cordis 瀑布，用数组模拟插件），把六段结构跑一遍：
 
 ```ts
 type Result = { isError: boolean; content: string; value?: unknown }
