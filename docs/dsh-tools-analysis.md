@@ -306,14 +306,27 @@ const postHooks: PostHook[] = [] // 第⑤站：脱敏/校验/重渲染（index.
 
 async function execute(exec: ToolExec): Promise<ToolResult> {
   // ① 参数物化：验证 → 快照 → 冻结 → token（本步先透传，step-02 填实）
+  // ② pre-execute 瀑布：任一 deny 短路即终止（未来：审批，index.ts:1459）
   for (const hook of preHooks) {
-    /* ② 任一 deny 短路 */
+    const decision = await hook(exec)
+    if (decision.kind === 'deny') return { isError: true, content: `Error: ${decision.reason}` }
   }
+  // ③ 单调守卫：只能拒绝，任一拒绝都是终局（未来：guardReason，index.ts:1119）
   for (const guard of guards) {
-    /* ③ 任一拒绝都是终局 */
+    const reason = guard(exec)
+    if (reason !== undefined) return { isError: true, content: `Error: guarded: ${reason}` }
   }
-  const result = await wrappers.reduceRight(/* ④ 从外到内包住 body */)()
-  return postHooks.reduce((r, hook) => hook(exec, r), result) // ⑤⑥
+  // ④ execute 环绕：wrapper 从外到内包住工具体（未来：超时插件，index.ts:1569）
+  const body = async (): Promise<ToolResult> => ({
+    isError: false,
+    content: `已删除 ${(exec.args as { path: string }).path}`,
+  })
+  const result = await wrappers.reduceRight(
+    (next: () => Promise<ToolResult>, wrap) => () => wrap(exec, next),
+    body,
+  )()
+  // ⑤⑥ post-execute + 最终化（未来：脱敏 + 事件通知，index.ts:1609/1631）
+  return postHooks.reduce((r, hook) => hook(exec, r), result)
 }
 ```
 
@@ -641,16 +654,16 @@ flowchart TB
 type PostToolDecision =
   { kind: 'accept' } | { kind: 'replace'; content: string } | { kind: 'block'; reason: string }
 
+/** post-execute 三态裁决：accept 原样透传 / replace 替换内容 / block 整份阻止 */
 for (const hook of postHooks) {
   const decision = hook(exec, result)
   if (decision.kind === 'accept') continue // 原样透传
-  if (decision.kind === 'replace') {
-    /* 替换内容 */
-  }
+  if (decision.kind === 'replace') result.content = decision.content // 脱敏：sk-xxx → ***
   if (decision.kind === 'block') {
-    /* 阻止进模型上下文 */
+    return { isError: true, content: `Error: blocked by post-execute: ${decision.reason}` }
   }
 }
+return result
 ```
 
 **实测输出**：
@@ -701,12 +714,35 @@ flowchart LR
 
 ```ts
 async function execute(exec: ToolExec): Promise<ToolResult> {
-  // ① 物化（createExecution，index.ts:1364）—— 验证 → 快照 → 冻结 → token
-  // ② pre-execute 瀑布（index.ts:1459）—— allow / deny / ask（ask 走审批，fail-closed）
-  // ③ 单调守卫（ToolGuard，index.ts:711）—— 任一拒绝都是终局
-  // ④ execute 环绕（index.ts:1569）—— 超时等横切插件包住 body
-  // ⑤ post-execute（index.ts:1609）—— 接受 / 替换 / 阻止
-  // ⑥ 最终化 —— 事件通知、日志收尾
+  // ① 物化在入口之前已完成（createExecution，index.ts:1364）：验证 → 快照 → 冻结 → token
+
+  // ② pre-execute 瀑布：allow / deny / ask，ask 走审批服务（fail-closed）
+  for (const hook of preHooks) {
+    const decision = await hook(exec)
+    if (decision.kind === 'allow') continue
+    if (decision.kind === 'deny') return { isError: true, content: `Error: ${decision.reason}` }
+    const resolved = await resolveAsk(exec, decision.reason) // 审批：无通道/非 allowed-once → deny
+    if (resolved.decision === 'deny') return { isError: true, content: `Error: ${resolved.reason}` }
+  }
+
+  // ③ 单调守卫：审批放行 ≠ 守卫放行，任一拒绝都是终局
+  const reason = guardReason(exec)
+  if (reason !== undefined) return { isError: true, content: `Error: guarded: ${reason}` }
+
+  // ④ execute 环绕：wrapper 从外到内包住工具体（超时/重试/日志都是这里的插件）
+  const body = async (): Promise<ToolResult> => {
+    const tool = registry.get(exec.name)
+    if (!tool) return { isError: true, content: `Error: unknown tool "${exec.name}"` }
+    return { isError: false, content: String(await tool.execute(exec.args)) }
+  }
+  const result = await wrappers.reduceRight(
+    (next: () => Promise<ToolResult>, wrap) => () => wrap(exec, next),
+    body,
+  )()
+
+  // ⑤ post-execute：接受 / 替换（脱敏）/ 阻止——结果进模型上下文前的最后一道门
+  // ⑥ 最终化：事件通知、日志收尾（简化省略）
+  return postHooks.reduce((r, hook) => hook(exec, r), result)
 }
 ```
 
