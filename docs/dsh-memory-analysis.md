@@ -869,27 +869,134 @@ class SessionWriteBehind {
 
 ### Step 07：全链路——一场对话的"记忆一生"
 
-**先懂几个词**：回顾前六步——事件日志（唯一事实源）/ surface 投影（视图现算）/ token 压力（超阈值触发）/ checkpoint（结构化保留 + replace 审计）/ KV cache（指令放末尾）/ write-behind（批量落盘）。
+**先懂几个词**：回顾前六步——**事件日志**（唯一事实源）/ **surface 投影**（视图现算）/ **token 压力**（超阈值触发）/ **checkpoint**（结构化保留 + replace 审计）/ **KV cache**（指令放末尾）/ **write-behind**（批量落盘）。
 
-**这一步解决什么问题**：前六步单独看都能懂，但真实会话里它们**接力**：日志 append → surface 投影 → 压力超阈值 → checkpoint 压缩（含 KV cache 放置 + replace 审计）→ write-behind 持久化。
+**这一步解决什么问题**：前六步单独看都能懂，但真实会话里它们是**接力**的：用户发了 15 轮消息、模型回了 15 条、中间调了工具、压力超 80%……哪层先动？哪层后动？没有整体视角，永远不知道"全貌"。
 
-**为什么这么设计**：四层各司其职——L1 记录真相（日志）、L2 决定看到什么（表面）、L3 决定何时折叠怎么折叠（压缩）、L4 决定何时落盘（持久化）。每层只解决一个问题，坏了一层不影响其他层。
+**为什么这么设计**：**每轮对话都走同一条管道**——L1 日志 append（记录真相）→ L2 表面投影（决定看到什么）→ L3 压力检查（超阈值才压缩：区域选择 → KV cache 复用的总结 → 表面 replace 带审计）→ L4 write-behind 异步落盘（不阻塞）。四层各司其职，坏了一层不影响其他层，接近真实 Harness 的 pre-step 检查。
 
-**收益**：读者从"每层单独看"升级到"看整体协作"——记忆系统的全貌。
+**收益**：朴素版"消息数组 + 超预算截断"走到结尾只剩最近几条、最早需求全丢；harness 四层接力走到结尾：日志全在、表面有 checkpoint、磁盘 0 丢失。
 
-**核心代码**（`step-07-full-chain.ts`，四层接力主循环）：
+**完整流程图**（一次 turn 的完整管道 + 压缩子流程）：
+
+```mermaid
+flowchart TB
+    subgraph TURN["每轮对话 turn()"]
+        A1["① 追加 user 消息"] --> A2["② 追加 assistant 消息"]
+        A2 --> A3{"有工具调用?"}
+        A3 -->|"有"| A4["③ 追加 tool/call + tool/result<br/>（tool/call 只进 L1 日志）"]
+        A3 -->|"无"| B
+        A4 --> B["④ L1/L2：append → 日志 + 表面自动更新<br/>+ write-behind enqueue（0ms 返回）"]
+        B --> C["⑤ L3：测压力"]
+    end
+
+    subgraph COMPACT["压缩子流程 maybeCompact()（压力 ≥ 80% 时）"]
+        C -->|"压力 < 80%"| D["✅ 本轮结束，等下一轮"]
+        C -->|"压力 ≥ 80%"| E["⑥ 区域选择：保留尾部 retainTokens<br/>前面全折叠"]
+        E --> F["⑦ 构建压缩请求：<br/>对话历史 + 总结指令（放最后一条 user 消息）"]
+        F --> G["⑧ KV cache：前缀全部命中<br/>只付指令增量（step-05）"]
+        G --> H["⑨ 生成结构化 checkpoint<br/>（Primary Request / Current Work / Next Step）"]
+        H --> I["⑩ 收敛校验：checkpoint 必须比影子内容小"]
+        I --> J["⑪ 表面 replace（带 sourceEventSeqs 审计）<br/>影子掉 [0, range.end]，插入 checkpoint"]
+        J --> D
+    end
+
+    D --> K["L4：turn 结束 flush() → 队列立即清空落盘"]
+
+    style E fill:#fdd
+    style J fill:#fdd
+```
+
+**核心代码**（`step-07-full-chain.ts`，CompactingSession 的四层编排——这是整场对话的"指挥中枢"）：
 
 ```ts
-// 每轮：L1 append 进日志（立即返回）→ L2 表面自动更新 → L3 测压力
-for (const round of conversation) {
-  session.append(round) // L1: 日志 + 表面 + write-behind 队列
-  const { pressure } = policy.measure(session.deriveMessages()) // L3: 测压力
-  if (policy.isOverThreshold({ pressure })) {
-    const cp = summarize(session.surfaceNodesList) // 生成 checkpoint
-    session.append(checkpointEvent(cp)) // replace + sourceEventSeqs 审计
+class CompactingSession {
+  session = new Session() // L1/L2：日志 + 表面
+  policy = new PressurePolicy(1000) // L3：压力阈值 80%，保留尾部 16%
+  backend = new MemoryBackend() // L4：落盘后端
+  writeBehind = new SessionWriteBehind(this.backend, 200) // L4：200ms 窗口
+  provider = new MockProvider() // KV cache 模拟
+  summarizer = new RuleBasedSummarizer() // 结构化总结
+  billing = { dialogue: 0, compact: 0, cached: 0 }
+
+  /** 一轮对话：四层接力全在这一条管道里 */
+  async turn(
+    question: string,
+    answer: string,
+    tool?: { name: string; args: string; result: string },
+  ) {
+    // L1：追加 user / assistant（进日志 + 表面 + write-behind 队列）
+    this.append({
+      type: 'user/message',
+      content: question,
+      surfaceOp: 'append',
+      sourceEventSeqs: [],
+    })
+    this.append({
+      type: 'assistant/message',
+      content: answer,
+      surfaceOp: 'append',
+      sourceEventSeqs: [],
+    })
+    if (tool) {
+      // 工具调用细节只进 L1 日志（日志专用事件），不进 L2 表面
+      this.append({ type: 'tool/call', name: tool.name, arguments: tool.args })
+      this.append({
+        type: 'tool/result',
+        content: tool.result,
+        surfaceOp: 'append',
+        sourceEventSeqs: [],
+      })
+    }
+    await this.maybeCompact() // L3：压力检查（超阈值才压缩）
+  }
+
+  /** L3 压缩子流程：压力 → 区域 → KV cache 总结 → 收敛 → replace */
+  private async maybeCompact(): Promise<void> {
+    const surface = this.session.surfaceMessages()
+    const m = this.policy.measure(surface)
+    m.pressure = m.tokens / this.policy.contextWindow
+    if (!this.policy.isOverThreshold(m)) return // 压力 < 80%：不压缩
+
+    // ① 区域选择：保留尾部最新 retainTokens，前面全折叠
+    const range = selectCompactableRange(surface, this.policy.retainTokens)
+    const shadowedMsgs = surface.slice(0, range.end + 1)
+    const shadowedTokens = shadowedMsgs.reduce((s, x) => s + estimateTokens(x.content), 0)
+
+    // ② KV cache 复用（step-05）：总结指令放最后一条 user 消息 = 对话请求的前缀扩展
+    const dialogueReq: Message[] = [
+      { role: 'system', content: SYSTEM_PROMPT },
+      ...surface.map(m => ({
+        role: m.role === 'tool' ? ('user' as const) : m.role,
+        content: m.content,
+      })),
+    ]
+    const compactReq: Message[] = [
+      ...dialogueReq,
+      { role: 'user', content: COMPACTION_INSTRUCTION },
+    ]
+    const c = this.provider.call(compactReq)
+    this.billing.compact += c.billed
+    this.billing.cached += c.cached
+
+    // ③ 结构化 checkpoint + 收敛校验（step-04）：总结必须比影子内容小
+    const checkpoint = this.summarizer.summarize(shadowedMsgs)
+    const framed = frameSummary(checkpoint)
+    const tokens = assertConverges(framed, shadowedTokens)
+
+    // ④ 表面 replace（step-04）：带 sourceEventSeqs 审计，影子掉 [0, range.end]
+    this.append({
+      type: 'user/message',
+      content: framed,
+      surfaceOp: { op: 'replace', start: 0, end: range.end },
+      sourceEventSeqs: shadowedMsgs.map(x => x.seq),
+    })
+  }
+
+  private append(event: SessionEvent): void {
+    this.writeBehind.enqueue(this.session.append(event)) // L1 + L4 同一条线
   }
 }
-await session.flush() // L4: turn 结束 flush 落盘
 ```
 
 **实测输出**（节选，15 轮对话）：
@@ -902,6 +1009,8 @@ await session.flush() // L4: turn 结束 flush 落盘
    💥 崩点：最初的需求 + 中间的修正全丢了，工具调用从未记录，审计查无实据
 
 ② harness 版：四层接力（L1 append → L2 surface → L3 压缩 → L4 落盘）
+   contextWindow=1000, 阈值=800, 保留=160
+
 --- 轮 7 ---
    ⚡ L3 压缩 #1：压力 0.862 ≥ 0.8
      区域：表面 [0, 12]（13 节点，678 tokens）
@@ -910,7 +1019,16 @@ await session.flush() // L4: turn 结束 flush 落盘
      压缩后压力 0.432 < 0.8 ✓
 --- 轮 10 ---
    ⚡ L3 压缩 #2：压力 0.805 ≥ 0.8
-     …
+     区域：表面 [0, 7]（8 节点，609 tokens）
+     KV cache：压缩付费 59 tokens，命中缓存 813
+     收敛：checkpoint 217 tokens < 影子 609
+     压缩后压力 0.413 < 0.8 ✓
+--- 轮 14 ---
+   ⚡ L3 压缩 #3：压力 0.903 ≥ 0.8
+     区域：表面 [0, 9]（10 节点，702 tokens）
+     KV cache：压缩付费 59 tokens，命中缓存 911
+     收敛：checkpoint 217 tokens < 影子 702
+     压缩后压力 0.418 < 0.8 ✓
 
 📊 结尾对比：朴素版 vs harness 版各剩什么
    朴素版：14 条原始消息（最早需求已丢）｜无工具记录｜无审计
@@ -920,7 +1038,11 @@ await session.flush() // L4: turn 结束 flush 落盘
 🎯 一句话：日志是真相 → 表面是视图 → 压力驱动压缩 → checkpoint 结构化保留 → write-behind 落盘。
 ```
 
-**看什么**：结尾对比是最有力的证据——**朴素版 14 条消息（最早需求已丢）vs harness 版日志 43 条全在 + 3 个 checkpoint + 0 丢失**。同样的对话，一个"失忆"，一个"存档"。四层接力让记忆系统同时做到：真相不丢（L1）、视图干净（L2）、省 token（L3）、崩溃不慌（L4）。
+**看什么**（三条最值得注意的证据）：
+
+- **每次压缩都是同一条流水线**：轮 7/10/14 三次压缩，结构完全一致——压力触发 → 区域选择 → KV cache 复用 → 收敛校验 → replace 审计。这就是"管道"的意义：机制固定，每次执行都走同一条路
+- **KV cache 命中越来越值钱**：三次压缩命中 870 → 813 → 911 tokens，但每次都只付 59 tokens 增量——因为总结指令放在最后一条 user 消息，对话前缀从未变过（step-05 的机制在真实链路里持续省钱）
+- **结尾对比是记忆系统的"体检报告"**：朴素版 14 条消息（最早需求已丢）vs harness 版日志 43 条全在 + 3 个 checkpoint + 0 丢失——四层接力同时做到：真相不丢（L1）、视图干净（L2）、省 token（L3）、崩溃不慌（L4）
 
 **7 步跑通的收获**：纸上读源码和亲手跑一遍是两种理解。Step 01 的断号检测、Step 02 的视图自动更新、Step 03 的压力条、Step 04 的 replace 契约校验、Step 05 的 170 vs 60 tokens、Step 06 的 0ms vs 95ms、Step 07 的结尾对比——这些真实输出把"事件溯源""投影""压力驱动""可审计压缩""前缀缓存""write-behind"从抽象概念变成了可触摸的事实。
 
