@@ -261,178 +261,96 @@ type PostToolDecision =
 - **restrict 掩码**：`allow`（白名单）/ `deny`（黑名单）编译成集合，多个限制**求交**；只作用于继承面（全局+祖先层），不作用于自己的注册
 - **run_code 保留在过滤外**：它作为"展示传输"永远可见，不能被 restrict 掉（restrict 里指名 `run_code` 直接报错）
 
-## 自己实现一遍：一个 100 行的最小六段管线
+## 🧪 自己动手：7 步渐进式理解设计哲学（代码 + 真实输出）
 
-> 📦 **可运行版**：本文配套的 7 步渐进式复现已放到 `articles/dsh-tools/`（ai-agent-code-lab 仓库），纯 Node 实现，不需要 API key。跑法二选一：
+> 2026-08-22 重构：从"机制叠加的 7 步复现"改为**每步只解决一个哲学点**——这一步回答一个问题：为什么这么设计、好处是什么、解决了什么。代码在 `articles/dsh-tools/src/steps/`（ai-agent-code-lab 仓库，纯 Node 实现，不需要 API key）。
 >
-> - 根目录：`pnpm run tools:step:01`（最小管线）→ `tools:step:02`（参数物化）→ `tools:step:03`（权限瀑布）→ `tools:step:04`（单调守卫）→ `tools:step:05`（取消）→ `tools:step:06`（超时）→ `tools:step:07`（并行调度）；完整版 `pnpm run run:dsh-tools`
-> - 或在 `articles/dsh-tools/` 目录内：`pnpm run step:01` ~ `step:07`（根目录的 `step:01` ~ `step:07` 属于 dsh-agent-loop 系列）
+> 跑法二选一：
+>
+> - 根目录：`pnpm run tools:step:01` ~ `tools:step:07`；完整版 `pnpm run run:dsh-tools`
+> - 或在 `articles/dsh-tools/` 目录内：`pnpm run step:01` ~ `step:07`
 
-理解了原理，先用 100 行实现一个**最小可用**的执行管线（不带 Cordis 瀑布，用数组模拟插件），把六段结构跑一遍：
+每步文件顶部都是四段式 JSDoc：**痛苦场景 → 为什么这么设计 → 收益 → 对应源码**。下面按步拆解，配核心代码和实测输出。
+
+### Step 01：管线骨架——工具调用 ≠ 调个函数
+
+**这一步解决什么问题**：模型说"调工具"，如果实现只是 `registry.get(name)(args)` 直接调函数，一切看起来都正常——直到某天出现：参数被篡改、危险工具被诱导执行、慢工具挂死、结果泄露密钥。问题不是"哪个工具坏了"，而是**调用本身没有任何关卡**。
+
+**为什么这么设计**：一次工具调用要过六道关（参数物化 → pre-execute → 守卫 → execute 环绕 → post-execute → 最终化），每道关在源码里都是一段独立流程。本步只搭骨架，每站留注释说明"未来这一站要干什么"。
+
+**收益**：先建立"一次调用过六道关"的地图，后面每步填实一道关。
+
+**核心代码**（`step-01-pipeline-skeleton.ts`，六段骨架 + 朴素对照）：
 
 ```ts
-type Result = { isError: boolean; content: string; value?: unknown }
-type Exec = { name: string; args: unknown; signal: AbortSignal }
-
-// ① 注册表：强制 output 声明
-const registry = new Map<string, { execute: Function; output: { schema: any; render: Function } }>()
-
-function register(name: string, def: { output: any; execute: Function }) {
-  if (!def.output?.schema || typeof def.output.render !== 'function') {
-    throw new TypeError(`tool "${name}" must declare output { schema, render }`)
-  }
-  registry.set(name, def)
+/** 朴素实现（对照）：没有管线，直接调函数——崩点从这一行开始 */
+async function naiveCall(name: string, args: { path: string }): Promise<string> {
+  return `已删除 ${args.path}` // 假设工具立即执行，没有任何关卡
 }
 
-// ②③ pre-execute 瀑布 + 单调守卫（数组模拟插件）
-const preHooks: ((exec: Exec) => 'allow' | 'deny' | 'ask')[] = []
-const guards: ((exec: Exec) => string | undefined)[] = []
+// ── 六段管线骨架（数组模拟 Cordis 瀑布）──
+const preHooks: PreHook[] = [] // 第②站：审批瀑布（allow/deny/ask，index.ts:588）
+const guards: Guard[] = [] // 第③站：单调拒绝（string = 拒绝理由，index.ts:711）
+const wrappers: Wrapper[] = [] // 第④站：execute 环绕（超时/重试/日志）
+const postHooks: PostHook[] = [] // 第⑤站：脱敏/校验/重渲染（index.ts:597）
 
-// ④⑤⑥ 环绕、后处理、最终化
-const wrappers: ((exec: Exec, next: () => Promise<Result>) => Promise<Result>)[] = []
-const postHooks: ((exec: Exec, result: Result) => Result)[] = []
-
-async function execute(exec: Exec): Promise<Result> {
-  // 取消检查点
-  if (exec.signal.aborted) return { isError: true, content: 'Error: aborted before dispatch' }
-
-  // ② pre-execute
-  for (const hook of preHooks) {
-    const d = hook(exec)
-    if (d === 'deny') return { isError: true, content: `Error: denied` }
-    if (d === 'ask') return { isError: true, content: `Error: requires approval` }
-  }
-  // ③ 单调守卫（只能拒绝）
-  for (const guard of guards) {
-    const reason = guard(exec)
-    if (reason) return { isError: true, content: `Error: ${reason}` }
-  }
-  // ④ 环绕包装 + body
-  const body = async (): Promise<Result> => {
-    const tool = registry.get(exec.name)
-    if (!tool) return { isError: true, content: `Error: unknown tool "${exec.name}"` }
-    const value = await tool.execute(exec.args, exec)
-    if (exec.signal.aborted) return { isError: true, content: 'Error: aborted' }
-    return { isError: false, content: tool.output.render(exec.args, value), value }
-  }
-  let result = await wrappers.reduceRight((next, wrap) => () => wrap(exec, next), body)()
-  // ⑤ post-execute
-  result = postHooks.reduce((r, hook) => hook(exec, r), result)
-  // ⑥ 最终化 + 通知（此处省略 observer）
-  return result
-}
-```
-
-跑通这个最小版再回头看 `ToolRuntime`，你会看到它多了什么：参数 lossless 快照 + 冻结、token 身份、信号融合、错误结构化（`error.info`）、值校验 + 重渲染、`deferContext`、`concludesTurn`、observer 隔离……**每一层都是真实的失败模式逼出来的**。
-
-## 📺 实战验证：7 步渐进式复现（代码 + 流程图 + 真实输出）
-
-> 2026-08-20 在公司 Windows 环境（Node + tsx）完整跑通。完整代码在 `articles/dsh-tools/src/steps/`（ai-agent-code-lab 仓库，纯 Node 实现，不需要 API key）。
->
-> **公共骨架（Step 01 定义，后续步骤沿用）**：
->
-> - `ToolResult = { isError: boolean; content: string; value?: unknown }` —— 工具执行结果（成功携带规范 value，失败携带错误文本）
-> - `ToolExec` —— 一次工具调用的执行上下文（Step 01 只有 `name/args`，后续步骤扩展 `signal`、`token`、`agent` 等）
-> - `registry: Map<string, { execute, output }>` —— 注册表，强制每个工具声明 output（schema + render）
-> - `preHooks / wrappers / postHooks` —— 三个数组模拟 Cordis 的可插拔瀑布
-
-### Step 01：最小六段管线（数组模拟瀑布）
-
-**这一步验证什么**：文章开头那张全景图——一次工具调用要过六道关，未知工具变成 `isError` 而不是让管线崩溃。
-
-**流程图**：
-
-```mermaid
-flowchart LR
-    A["execute(exec)"] --> B["② pre-execute 瀑布<br/>allow / deny / ask"]
-    B --> C["④ wrappers 环绕 + body<br/>（reduceRight 最外层先介入）"]
-    C --> D["⑤ post-execute 后处理"]
-    D --> E["⑥ 返回结果（简化版省略事件通知）"]
-```
-
-**核心代码**（自包含；`registry`/`preHooks`/`wrappers`/`postHooks` 见公共骨架）：
-
-```ts
 async function execute(exec: ToolExec): Promise<ToolResult> {
-  // ② pre-execute 瀑布：任一钩子短路即终止
+  // ① 参数物化：验证 → 快照 → 冻结 → token（本步先透传，step-02 填实）
   for (const hook of preHooks) {
-    const decision = hook(exec)
-    if (decision === 'deny') {
-      return { isError: true, content: `Error: tool "${exec.name}" denied by policy` }
-    }
-    if (decision === 'ask') {
-      return { isError: true, content: `Error: tool "${exec.name}" requires approval (no channel)` }
-    }
+    /* ② 任一 deny 短路 */
   }
-  // ④ 环绕包装 + 工具体：reduceRight 让最外层 wrapper 最先执行
-  const body = async (): Promise<ToolResult> => {
-    const tool = registry.get(exec.name) // 未注册 → 结构化错误，不崩溃
-    if (!tool) return { isError: true, content: `Error: unknown tool "${exec.name}"` }
-    const value = await tool.execute(exec.args, exec)
-    return { isError: false, content: tool.output.render(exec.args, value), value }
+  for (const guard of guards) {
+    /* ③ 任一拒绝都是终局 */
   }
-  let result = await wrappers.reduceRight((next, wrap) => () => wrap(exec, next), body)()
-  // ⑤ post-execute：统一后处理（替换内容 / 阻止）
-  result = postHooks.reduce((r, hook) => hook(exec, r), result)
-  return result // ⑥ 最终化（Step 01 简化：直接返回）
-}
-
-// 注册：强制 output 声明，少一个直接 TypeError
-function register(name: string, def: { execute: Function; output: { render: Function } }): void {
-  if (typeof def.output?.render !== 'function' || typeof def.execute !== 'function') {
-    throw new TypeError(`tool "${name}" must declare output { schema, render } + execute`)
-  }
-  registry.set(name, def)
+  const result = await wrappers.reduceRight(/* ④ 从外到内包住 body */)()
+  return postHooks.reduce((r, hook) => hook(exec, r), result) // ⑤⑥
 }
 ```
 
 **实测输出**：
 
 ```text
-🛠️ 六段管线最小版（数组模拟瀑布）
-----------------------------------------
-✅ add(1,2)        → isError=false content="result = 3"
-🚫 add(3,4) 有拒绝钩子 → isError=true content="Error: tool \"add\" denied by policy"
-❓ 未知工具         → isError=true content="Error: unknown tool \"rm -rf /\""
+🧩 Step 01 – 管线骨架：工具调用 ≠ 调个函数
+-----------------------------------------------
+模型说：删除 A.txt
+  朴素实现：已删除 A.txt ← 删了就删了，没有任何关卡
+  管线实现：已删除 A.txt ← 六道关全部通过
+
+六道关（本步只有骨架，注释标注了未来职责）：
+  ① 参数物化 —— 参数已进审计，执行时不许变（step-02 填实）
+  ② pre-execute —— 危险工具要问人（step-03 填实）
+  ③ 单调守卫 —— 策略红线，只能拒绝（step-04 填实）
+  ④ execute 环绕 —— 超时/重试包在外面（step-05 填实）
+  ⑤ post-execute —— 结果也要过门（step-06 填实）
+  ⑥ 最终化 —— 事件通知、日志收尾
+
+🎯 一句话：直接调函数 = 裸奔；管线 = 每道关一个失败模式的答案
 ```
 
-**看什么**：未知工具不是让管线抛异常，而是变成 `isError` 结果——模型看到错误可以自我纠正，而不是整个 turn 崩溃。这是文章「第六站」的核心结论。
+**看什么**：同一行"删除 A.txt"，朴素版删了就删了，管线版先过六道关——**管线的存在意义是给每种失败模式一个拦截点**。后面每步填实一道关，你会看到每道关都对应一种真实事故。
 
-### Step 02：参数物化（lossless 快照 + 冻结 + 执行身份）
+### Step 02：参数物化——为什么参数要"冻"起来？
 
-**这一步验证什么**：文章「第一站」——为什么参数要"冻"起来。快照必须无损（不能用 `JSON.stringify`）、冻结后修改直接抛 TypeError、失真参数在源头拦下。
+**这一步解决什么问题**：参数已经出现在模型历史 / 审计日志 / UI 里（三个读者），但工具执行时才真正读参数。如果执行期间参数还能被改——"展示的是 A，执行的是 B"，**审计无法自证"当时到底执行了什么"**。
 
-**流程图**：
+**为什么这么设计**：物化 = 验证 → 快照 → 冻结 → 发 token。验证保证参数是无损 JSON（undefined / 函数 / 循环引用在序列化时丢信息，fail-closed 直接拒绝）；快照克隆切断与调用方的引用；冻结让任何路径的写入都抛 TypeError；token 是执行身份的凭据。
 
-```mermaid
-flowchart TB
-    A["createExecution(input)"] --> B["snapshotJsonValue<br/>lossless 校验 + structuredClone"]
-    B -->|"有损（undefined/函数/循环引用）"| C["🚫 rejected<br/>绝不进入管线"]
-    B -->|"无损"| D["deepFreeze 递归冻结"]
-    D --> E["分配不透明 token<br/>Symbol(dsh.tool.execution)"]
-    E --> F["✅ ready: { token, callId, name, arguments }"]
-```
+**收益**：参数一进管线就"定型"，审计、重放、并行调度看到的永远是同一份。
 
-**核心代码**（自包含）：
+**核心代码**（`step-02-arg-freezing.ts`）：
 
 ```ts
-/** lossless 校验：undefined / function / symbol / bigint / 循环引用都拒绝 */
+/** 无损 JSON 校验：JSON 会丢信息的值（undefined/函数/symbol/bigint/循环引用）一律拒绝 */
 function isLosslessJson(value: unknown, seen = new Set<object>()): boolean {
-  if (value === null) return true
-  const type = typeof value
-  if (type === 'string' || type === 'number' || type === 'boolean') return true
-  if (type === 'undefined' || type === 'function' || type === 'symbol' || type === 'bigint')
-    return false
-  if (type === 'object') {
-    if (seen.has(value)) return false // 循环引用
-    seen.add(value)
-    if (Array.isArray(value)) return value.every(v => isLosslessJson(v, seen))
-    return Object.values(value).every(v => isLosslessJson(v, seen))
-  }
-  return false
+  if (value === null || ['string', 'number', 'boolean'].includes(typeof value)) return true
+  if (typeof value !== 'object' || seen.has(value)) return false
+  seen.add(value)
+  return Array.isArray(value)
+    ? value.every(v => isLosslessJson(v, seen))
+    : Object.values(value).every(v => isLosslessJson(v, seen))
 }
 
-/** 递归冻结：任何路径上的修改都会在严格模式下抛 TypeError */
+/** 递归冻结：strict 模式下对冻结对象任何路径的写入都会抛 TypeError */
 function deepFreeze<T>(value: T): T {
   if (value !== null && typeof value === 'object') {
     Object.freeze(value)
@@ -442,17 +360,14 @@ function deepFreeze<T>(value: T): T {
   return value
 }
 
-/** 不透明执行 token：只用于身份比较（brand Symbol，外界无法伪造） */
-const toolExecutionTokenBrand = Symbol('token-brand')
-type ToolExecutionToken = symbol & { readonly [toolExecutionTokenBrand]: true }
-function createExecutionToken(): ToolExecutionToken {
-  return Symbol('dsh.tool.execution') as ToolExecutionToken
-}
-
-/** 物化一次调用：快照失败 → 拒绝；成功 → 冻结 + 分配 token */
-function createExecution(input: { callId: string; name: string; arguments: unknown }) {
-  const detached = isLosslessJson(input.arguments) ? structuredClone(input.arguments) : undefined
-  if (detached === undefined) {
+/** 物化：验证 → 快照（structuredClone 切断引用）→ 冻结 → 分配 token */
+function createExecution(input: {
+  callId: string
+  name: string
+  args: unknown
+  signal: AbortSignal
+}) {
+  if (!isLosslessJson(input.args)) {
     return {
       kind: 'rejected',
       reason: `tool "${input.name}" arguments must be losslessly JSON-serializable`,
@@ -461,10 +376,10 @@ function createExecution(input: { callId: string; name: string; arguments: unkno
   return {
     kind: 'ready',
     exec: {
-      token: createExecutionToken(),
       callId: input.callId,
       name: input.name,
-      arguments: deepFreeze(detached),
+      args: deepFreeze(structuredClone(input.args)),
+      signal: input.signal,
     },
   }
 }
@@ -473,138 +388,96 @@ function createExecution(input: { callId: string; name: string; arguments: unkno
 **实测输出**：
 
 ```text
-🧊 参数物化：lossless 快照 + deepFreeze + token 身份
-----------------------------------------
-✅ 合法参数物化成功，token = Symbol(dsh.tool.execution)
-🚫 尝试修改冻结参数 → TypeError: Cannot assign to read only property 'path'...
-🚫 有损参数被拒绝：tool "read_file" arguments must be losslessly JSON-serializable
-🔑 相同 callId 的两次物化：token 不同（是）——token 标识的是"这一次执行"
+🧊 Step 02 – 参数物化：参数要"冻"起来
+------------------------------------------
+场景 1：模型说删 A.txt，await 期间外部把参数改成 B.txt
+  展示/审计/UI 看到：A.txt
+  实际执行：已删除 A.txt ← 删的是 A！三个读者永远看到同一份
+
+场景 2：有人想写冻结参数
+  💥 抛错：Cannot assign to read only property 'path' of object '#<Object>'
+
+场景 3：传有损参数（path: undefined，JSON 序列化会丢这个字段）
+  物化结果：💥 拒绝（tool "delete_file" arguments must be losslessly JSON-serializable）
+
+🎯 一句话：参数一进管线就定型——审计自证靠"冻结"，不是靠自觉
 ```
 
-**看什么**：`JSON.stringify` 会把 -0 变 0、NaN 变 null（丢失信息），所以必须 `structuredClone`；`deepFreeze` 让"执行时改参数 = 三个读者看到三个版本"的问题在运行时直接爆炸；同 callId 两次物化 token 不同——token 绑定的是"这一次执行"而不是"这个调用"。
+**看什么**：场景 1 是核心——**审计自证不靠"约定"，靠运行时强制**。调用方改原对象、执行方改冻结参数，两条路径都被切断。有损参数在源头拒绝（fail-closed），绝不带着"和被展示过的不一样"的参数进入政策管线。
 
-### Step 03：pre-execute 瀑布（allow / deny / ask）
+### Step 03：审批瀑布——为什么危险工具要问人？
 
-**这一步验证什么**：文章「第二站」——ask 走审批服务，且**没有审批通道时 ask 降级为 deny**（fail-closed，绝不静默放行）。
+**这一步解决什么问题**：模型被 prompt injection 诱导时，"执行 delete_file(path=C.txt)" 只是模型输出里的一行。如果 pre-execute 没有关卡，这一行就直接变成删库命令。
 
-**流程图**：
+**为什么这么设计**：pre-execute 瀑布里每个钩子返回 allow / deny / ask 三态，任一钩子短路即终止；ask 把"要不要执行"从模型手里拿出来，交给审批服务（真实场景是人工弹窗）。源码中 ask 走 serviceAsk()（index.ts:1689）：**无审批通道或用户不是 "allowed-once" 确认，全部 fail-closed 降级 deny**。
 
-```mermaid
-flowchart TB
-    A["pre-execute 钩子返回 ask"] --> B["resolveAsk"]
-    B --> C{"approvalService 存在?"}
-    C -->|否| D["🚫 deny: requires approval (not yet supported)"]
-    C -->|是| E{"exec.agent 存在?"}
-    E -->|否| F["🚫 deny: no agent"]
-    E -->|是| G["审批服务 request()"]
-    G --> H{"outcome"}
-    H -->|allowed-once| I["✅ allow"]
-    H -->|rejected / cancelled / unavailable| J["🚫 deny + 各自理由"]
-```
+**收益**：危险工具必须过人类监督点；策略按工具声明（requiresApproval），模型无法绕过。
 
-**核心代码**（自包含；`preHooks` 见公共骨架）：
+**核心代码**（`step-03-approval-waterfall.ts`）：
 
 ```ts
-type ApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
-interface ApprovalService {
-  request(req: { toolName: string; reason?: string }): Promise<ApprovalOutcome>
-}
-let approvalService: ApprovalService | undefined // 可选的，没有就降级 deny
+/** pre-execute 三态：allow 放行 / deny 拒绝 / ask 问人（源码 PreToolDecision，index.ts:588） */
+type PreToolDecision =
+  { kind: 'allow' } | { kind: 'deny'; reason: string } | { kind: 'ask'; reason?: string }
 
 /** 复刻源码 serviceAsk 的 fail-closed 语义：只有 allowed-once 放行 */
-async function resolveAsk(
-  exec: ToolExec & { agent?: { id: string } },
-  ask: { kind: 'ask'; reason?: string },
-) {
+async function resolveAsk(exec: ToolExec, reason?: string) {
   if (approvalService === undefined) {
     return {
       decision: 'deny',
-      reason: ask.reason ?? `tool "${exec.name}" requires approval (not yet supported)`,
+      reason: reason ?? `tool "${exec.name}" requires approval (no channel)`,
     }
   }
-  if (exec.agent === undefined) {
-    return {
-      decision: 'deny',
-      reason: `tool "${exec.name}" requires approval, but the call has no agent`,
-    }
-  }
-  const outcome = await approvalService.request({ toolName: exec.name, reason: ask.reason })
-  switch (outcome) {
-    case 'allowed-once':
-      return { decision: 'allow' }
-    case 'rejected':
-      return { decision: 'deny', reason: `the user rejected tool "${exec.name}"` }
-    case 'cancelled':
-      return { decision: 'deny', reason: `approval for tool "${exec.name}" was cancelled` }
-    case 'unavailable':
-      return {
-        decision: 'deny',
-        reason: `tool "${exec.name}" requires approval, but no channel is available`,
-      }
-  }
+  const outcome = await approvalService.request({ toolName: exec.name })
+  return outcome === 'allowed-once'
+    ? { decision: 'allow' }
+    : { decision: 'deny', reason: `the user rejected tool "${exec.name}"` }
 }
 ```
 
 **实测输出**：
 
 ```text
-🚦 pre-execute 瀑布：allow / deny / ask（ask 缺审批 = deny）
-----------------------------------------
-🚫 rm      → Error: rm is not allowed for this agent
-❓ bash（无审批服务）→ Error: bash needs human approval
- 👤 审批弹窗: 允许调用 "bash"? → 用户点了「允许」
-✅ bash（用户批准）→ approved-once: tool "bash" executed
- 👤 审批弹窗: 允许调用 bash? → 用户点了「拒绝」
-🚫 bash（用户拒绝）→ Error: the user rejected tool "bash"
-❓ bash（无 agent）→ Error: tool "bash" requires approval, but the call has no agent
+🚦 Step 03 – 审批瀑布：危险工具要问人
+-------------------------------------------
+场景 1：模型读 notes.txt（read_file，无风险）
+  → 文件 notes.txt 的内容：... ← 瀑布直接 allow，不问人
+
+场景 2：模型被诱导删 C.txt（delete_file）→ 弹窗，用户拒绝
+  👤 审批弹窗：允许 "delete_file" 删除 C.txt？→ 用户点了「拒绝」
+  → Error: the user rejected tool "delete_file" ← 模型无法绕过
+
+场景 3：模型再次删 D.txt → 弹窗，用户确认
+  👤 审批弹窗：允许 "delete_file" 删除 D.txt？→ 用户点了「允许」
+  → 已删除 D.txt ← 只有 allowed-once 放行
+
+场景 4：审批服务不可用（真实场景：进程没接上审批通道）
+  → Error: delete_file needs human approval ← 无通道也拒绝，绝不静默放行
+
+🎯 一句话：要不要执行，从模型手里拿出来，交给政策（allow / deny / ask）
 ```
 
-**看什么**：审批四种结局（批准/拒绝/取消/无通道）全被验证；无 agent 的调用也拒绝——没有会话可审计、没有 UI 可路由。
+**看什么**：场景 4 是精髓——**审批通道没接上 = 拒绝，不是放行**。fail-closed 的默认姿势贯穿整个管线：猜错方向永远偏向"保守"。
 
-### Step 04：单调守卫（只能拒绝，不能放行）
+### Step 04：单调守卫——为什么守卫只能"拒绝"？
 
-**这一步验证什么**：文章「第三站」——守卫没有 allow 分支，任何顺序下拒绝都是终局。
+**这一步解决什么问题**：审批放行之后，还有策略红线（禁删 AGENTS.md、禁读 .env）。如果守卫既能拒绝又能放行，注册顺序就决定"谁说了算"：A 拒绝、B 放行 → 结果变放行，守卫互相踩——加一个守卫反而可能解除另一个守卫的拒绝。
 
-**流程图**：
+**为什么这么设计**：ToolGuard 的返回类型只有 `string | undefined`——拒绝理由或"不表态"，**没有 allow 分支**。源码注释："Because guards have no allow result, listener ordering cannot turn a denial back into permission"（守卫没有放行结果，监听顺序永远无法把拒绝翻回许可）。**拒绝是幂等安全的，放行不是**。
 
-```mermaid
-flowchart TB
-    A["guardReason(exec)"] --> B["遍历 globalGuards"]
-    B --> C{"返回 reason?"}
-    C -->|是| D["🚫 拒绝（终局）"]
-    C -->|否| E["遍历 agentGuards[agent.id]"]
-    E --> F{"返回 reason?"}
-    F -->|是| D
-    F -->|否| G["✅ 放行"]
-    style D fill:#fdd
-```
+**收益**：守卫注册顺序无关，任何一道拒绝都是终局；策略可叠加、不会互相抵消。
 
-**核心代码**（自包含）：
+**核心代码**（`step-04-monotonic-guard.ts`）：
 
 ```ts
-interface ToolExec {
-  readonly name: string
-  readonly args: unknown
-  readonly agent?: { id: string }
-}
+/** 守卫：string = 拒绝理由；undefined = 不表态。故意没有 allow 分支 */
+type ToolGuard = (exec: Readonly<ToolExec>) => string | undefined
 
-/** 守卫：返回 reason = 拒绝；返回 undefined = 不改变决策。没有 allow 分支！ */
-type ToolGuard = (exec: ToolExec) => string | undefined
-
-const globalGuards: ToolGuard[] = [] // 全局层：对所有 agent 生效
-const agentGuards = new Map<string, ToolGuard[]>() // agent 层：只对特定 agent 生效
-
-/** 查守卫：先全局层，再沿作用域链从远到近。任一拒绝即终局。 */
+/** 任一守卫的拒绝都是终局（简化版 guardReason，源码还查全局 + scope 链） */
 function guardReason(exec: ToolExec): string | undefined {
-  for (const guard of globalGuards) {
+  for (const guard of guards) {
     const reason = guard(exec)
     if (reason !== undefined) return reason
-  }
-  if (exec.agent !== undefined) {
-    for (const guard of agentGuards.get(exec.agent.id) ?? []) {
-      const reason = guard(exec)
-      if (reason !== undefined) return reason
-    }
   }
   return undefined
 }
@@ -613,305 +486,202 @@ function guardReason(exec: ToolExec): string | undefined {
 **实测输出**：
 
 ```text
-🛡️ 单调守卫：只能拒绝，顺序无关
+🛡️ Step 04 – 单调守卫：守卫只能拒绝
 ----------------------------------------
-🚫 write_file(../etc/passwd) 顺序[write, danger] → write tools are frozen for this task
-🚫 write_file(../etc/passwd) 顺序[danger, write] → path escapes workspace
-✅ read_file(src/index.ts)   → 放行
-🔒 subagent 被 agent-1 调 → agent-1 cannot spawn subagents
-🔓 subagent 被 agent-2 调 → 放行
+场景 1：删除 notes.txt（无红线）
+  guardReason → undefined（放行）
+
+场景 2：删除 AGENTS.md（红线）
+  guardReason → AGENTS.md is protected ← 终局，后续守卫不用再看
+
+场景 3：删除 .env（红线，注册在最前）
+  guardReason → .env is protected
+
+反例：假设守卫能返回 allow——
+  守卫 A（拒绝 .env）→ 守卫 B（放行 delete_file）：顺序 先A后B = 放行
+  同一组守卫顺序颠倒：先B后A = 拒绝 → 结果由注册顺序决定，守卫互相踩
+  所以类型上就没有 allow：拒绝是幂等的，放行不是。
+
+🎯 一句话：审批管"能不能"，守卫管"绝对不行"——拒绝永远是终局
 ```
 
-**看什么**：同一个危险调用，两个守卫顺序颠倒结果都是拒绝（只是谁先拒绝不同）——如果守卫能"放行"，注册顺序就决定了谁说了算（A 拒绝、B 放行 → 结果放行），审计无法回答"为什么放行/拒绝"。只允许拒绝 = 监听者顺序永远不会把拒绝变回许可，这是"单调性"。
+**看什么**：反例演示是整个 step 的高潮——**守卫如果有 allow 分支，结果就由注册顺序决定**，审计无法回答"为什么放行/拒绝"。类型层面删掉 allow，让"顺序无关"在编译期就成立。
 
-### Step 05：协作式取消（ABORTED vs ABORTED_BEFORE_DISPATCH）
+### Step 05：超时环绕——为什么超时是"包一层"？
 
-**这一步验证什么**：文章「取消体系」——不竞速、不放弃 Promise；两个错误码区分"停在哪了"。
+**这一步解决什么问题**：慢工具（读 100MB 日志）无限等待会拖垮整个 agent。如果让每个工具自己写超时，20 个工具 20 份重复代码，而且容易漏——漏一个就是挂死。
 
-**流程图**：
+**为什么这么设计**：超时是"横切关注点"——超时 / 日志 / 重试是包在工具外面的能力，不该是工具自己的责任。execute 环绕（wrapper）把超时做成插件，工具声明 timeoutMs 预算即可，任何工具注册后自动获得超时能力，工具函数一行都不用改。
 
-```mermaid
-flowchart TB
-    A["execute(exec)"] --> B{"入口 signal.aborted?"}
-    B -->|是| C["ABORTED_BEFORE_DISPATCH<br/>body 没跑"]
-    B -->|否| D["body 启动（bodyInvoked = true）"]
-    D --> E["await tool(exec)<br/>协作式：不 race，等它自然结束"]
-    E --> F{"结束后 signal.aborted?"}
-    F -->|是| G["ABORTED<br/>成功结果被取消覆盖"]
-    F -->|否| H["✅ 正常结果"]
-```
+**收益**：关注点分离——工具只管"做什么"，超时管"多久"，改策略不用改工具。
 
-**核心代码**（自包含）：
+**核心代码**（`step-05-timeout-wrap.ts`）：
 
 ```ts
-type ToolResult =
-  | { isError: false; content: string; value?: unknown }
-  | { isError: true; content: string; error: { code: string } }
-
-interface ToolExec {
-  readonly name: string
-  readonly args: unknown
-  readonly signal: AbortSignal
+/** 超时插件：Promise.race 包一层，超时就返回 TOOL_TIMEOUT 错误（简化版） */
+function installTimeoutPolicy(): void {
+  wrappers.push(async (exec, next) => {
+    const timeoutMs = registry.get(exec.name)?.timeoutMs
+    if (timeoutMs === undefined) return next() // 没声明预算就不管
+    const timer = new Promise<ToolResult>(resolve => {
+      setTimeout(
+        () =>
+          resolve({
+            isError: true,
+            content: `Error: tool "${exec.name}" timed out after ${timeoutMs}ms`,
+            error: { code: 'TOOL_TIMEOUT' },
+          }),
+        timeoutMs,
+      )
+    })
+    return await Promise.race([next(), timer])
+  })
 }
+```
 
-/** body 是否已启动：决定取消用哪个错误码（回放需要知道"到底跑没跑"） */
-function cancellationResult(bodyInvoked: boolean): ToolResult {
-  return bodyInvoked
-    ? { isError: true, content: 'Error: tool call aborted', error: { code: 'ABORTED' } }
-    : {
-        isError: true,
-        content: 'Error: tool call aborted before dispatch',
-        error: { code: 'ABORTED_BEFORE_DISPATCH' },
-      }
+**实测输出**：
+
+```text
+⏱️ Step 05 – 超时环绕：超时是"包一层"
+---------------------------------------------
+场景 1：读 huge.log（工具要 2s，预算 500ms）
+  503ms 后返回：Error: tool "read_file" timed out after 500ms
+  调用方不挂死——超时是插件给的，不是工具自己写的
+
+场景 2：同一工具函数，预算改成 3000ms（工具代码一行没改）
+  2006ms 后成功：文件 huge.log 的内容：...
+
+场景 3：echo（没声明预算，照常执行）
+  → echo: hi
+
+🎯 一句话：超时是工具外面的插件——注册即获得，工具专注"做什么"
+```
+
+**看什么**：场景 2 是核心证据——**同一工具函数，只改声明的预算，工具代码零改动**。超时能力是"注册即获得"的，这就是横切关注点 vs 工具自实现的分水岭。
+
+### Step 06：post-execute——为什么执行结果也要过一道门？
+
+**这一步解决什么问题**：工具返回的值不一定适合直接给模型看——read_file 可能返回 api_key=sk-xxx，日志导出可能混着 password 字段。如果结果直接进模型上下文，密钥就"过了一次模型"（可能在历史里留存、被模型引用、被泄露）。
+
+**为什么这么设计**：**输出同输入一样不可信**。post-execute 是接受 / 替换 / 阻止三道门（源码 PostToolDecision，index.ts:597）：脱敏、校验、重渲染都挂这里，和工具逻辑解耦——工具不知道也不关心谁在看结果。
+
+**收益**：结果处理（脱敏 / 校验 / 重渲染）集中一处，策略可叠加，工具保持纯粹。
+
+**核心代码**（`step-06-post-execute.ts`）：
+
+```ts
+/** post-execute 三态：接受 / 替换 / 阻止（源码 PostToolDecision，index.ts:597） */
+type PostToolDecision =
+  { kind: 'accept' } | { kind: 'replace'; content: string } | { kind: 'block'; reason: string }
+
+for (const hook of postHooks) {
+  const decision = hook(exec, result)
+  if (decision.kind === 'accept') continue // 原样透传
+  if (decision.kind === 'replace') {
+    /* 替换内容 */
+  }
+  if (decision.kind === 'block') {
+    /* 阻止进模型上下文 */
+  }
 }
+```
 
+**实测输出**：
+
+```text
+🚪 Step 06 – post-execute：结果也要过一道门
+--------------------------------------------------
+场景 1：读 config.json（含 api_key）
+  工具原始返回：文件 config.json 的内容：api_key=sk-abc123456
+  模型看到：文件 config.json 的内容：api_key=*** ← 密钥在进入模型上下文前被替换
+
+场景 2：读 user.db 导出（含 password 字段）
+  工具原始返回：username=alice,password=hunter2
+  模型看到：Error: blocked by post-execute: result contains sensitive keyword "password" ← 整份结果被阻止，不进模型上下文
+
+场景 3：读 notes.txt（干净内容）
+  模型看到：会议记录：明天 10 点评审 ← accept，原样透传
+
+🎯 一句话：输出同输入一样不可信——进出都要过门，脱敏/校验和工具逻辑解耦
+```
+
+**看什么**：场景 2 比场景 1 更狠——不只是脱敏，而是**整份阻止**。密钥"过了一次模型"就可能在历史里留存，所以宁可结果进不来，也不能让敏感数据进上下文。
+
+### Step 07：完整管线——一次调用六道关的协作
+
+**这一步解决什么问题**：前六步每道关单独看都能懂，但真实调用里它们是协作的：审批放行后守卫还能拒绝；守卫放行后超时还能截断；执行结果还会被脱敏。关与关如何衔接、短路如何传播，只有看完整旅程才知道。
+
+**为什么这么设计**：六道关的顺序不是随意的——物化在前（参数定型），pre-execute 和守卫在 execute 之前（决策先于动作），环绕包住 execute（横切关注点），post-execute 在结果进模型上下文之前（输出把关），最终化收尾（通知/日志）。
+
+**收益**：一次调用 = 一个完整旅程；任何一道关都能独立短路，互不干扰。
+
+**核心代码**（`step-07-full-pipeline.ts`，主流程串联六站）：
+
+```ts
 async function execute(exec: ToolExec): Promise<ToolResult> {
-  if (exec.signal.aborted) return cancellationResult(false) // 检查点 ①：dispatch 前已取消
-  const tool = registry.get(exec.name)
-  if (!tool)
-    return {
-      isError: true,
-      content: `Error: unknown tool "${exec.name}"`,
-      error: { code: 'UNKNOWN_TOOL' },
-    }
-  const bodyInvoked = true
-  try {
-    const value = await tool(exec) // 协作式：不 race，等它结束（quiescence）
-    return exec.signal.aborted
-      ? cancellationResult(bodyInvoked)
-      : { isError: false, content: `result = ${String(value)}` }
-  } catch (error) {
-    return { isError: true, content: `Error: ${String(error)}`, error: { code: 'TOOL_ERROR' } }
-  }
+  // ① 物化（createExecution，index.ts:1364）—— 验证 → 快照 → 冻结 → token
+  // ② pre-execute 瀑布（index.ts:1459）—— allow / deny / ask（ask 走审批，fail-closed）
+  // ③ 单调守卫（ToolGuard，index.ts:711）—— 任一拒绝都是终局
+  // ④ execute 环绕（index.ts:1569）—— 超时等横切插件包住 body
+  // ⑤ post-execute（index.ts:1609）—— 接受 / 替换 / 阻止
+  // ⑥ 最终化 —— 事件通知、日志收尾
 }
 ```
 
-**实测输出**：
+**实测输出**（四个场景覆盖"放行 / 审批 / 红线 / 超时"四种结局）：
 
 ```text
-🛑 协作式取消：ABORTED / ABORTED_BEFORE_DISPATCH
-----------------------------------------
-① 入口已取消      → code=ABORTED_BEFORE_DISPATCH  "Error: tool call aborted before dispatch"
-② 运行中取消(协作) → code=ABORTED  "Error: tool call aborted"（body 被等完了）
-③ 运行中取消(无视) → code=ABORTED  "Error: tool call aborted"（不放弃 Promise）
-④ 正常完成        → code=-  "result = done"
-```
+🧩 Step 07 – 完整管线：一次调用六道关的协作
+--------------------------------------------------
+场景 1：模型读 notes.txt（read_file，无风险）
+  ① 物化 → ready（快照 + 冻结 + token）
+  ② pre-execute → allow（无风险工具）
+  ③ guard → 全部放行（无守卫拒绝）
+  ④ wrapper → 无超时 / 正常返回
+  ⑤ post-execute → replace（脱敏）
+  ⑥ 最终化 → 事件通知 + 日志（简化省略）
+  结果：文件 notes.txt 的内容：api_key=*** ✅
 
-**看什么**：③ 是最值钱的证据——工具不尊重 signal，系统也不杀它，而是等它自然结束（quiescence）再把结果替换成 ABORTED。这就是"协作式"的字面含义；若用 `Promise.race`，被放弃的 Promise 里的工作还在跑，可能产生你不知道的副作用。
+场景 2：模型删 A.txt（delete_file，危险）→ 审批确认
+  ① 物化 → ready（快照 + 冻结 + token）
+  ② pre-execute → ask（delete_file needs human approval）
+  👤 审批弹窗：允许 "delete_file"？→ 用户点了「允许」
+  👤 审批 → allowed-once，放行
+  ③ guard → 全部放行（无守卫拒绝）
+  ④ wrapper → 无超时 / 正常返回
+  ⑤ post-execute → accept
+  ⑥ 最终化 → 事件通知 + 日志（简化省略）
+  结果：已删除 A.txt ✅
 
-### Step 06：超时策略（tools/execute 环绕上挂插件）
+场景 3：模型删 AGENTS.md（红线）→ 审批也过了，但守卫拒绝
+  ① 物化 → ready（快照 + 冻结 + token）
+  ② pre-execute → ask（delete_file needs human approval）
+  👤 审批弹窗：允许 "delete_file"？→ 用户点了「允许」
+  👤 审批 → allowed-once，放行
+  ③ guard → deny（AGENTS.md is protected）← 审批放行 ≠ 守卫放行
+  结果：Error: guarded: AGENTS.md is protected 🚫
 
-**这一步验证什么**：文章「第四站」——超时是挂在 `tools/execute` 瀑布上的插件（源码只有 81 行），读工具声明的 `timeoutMs` → 派生带截止的信号 → 替换 `exec.signal`（**这是唯一允许换信号的阶段**）→ 委托执行 → 计时器赢了就替换成结构化 TOOL_TIMEOUT → finally 恢复原信号。
+场景 4：模型读 huge.log（慢工具）→ 500ms 预算截断
+  ① 物化 → ready（快照 + 冻结 + token）
+  ② pre-execute → allow（无风险工具）
+  ③ guard → 全部放行（无守卫拒绝）
+  ④ wrapper → 超时截断
+  ⑤ post-execute → accept
+  ⑥ 最终化 → 事件通知 + 日志（简化省略）
+  502ms 后：Error: tool "read_file" timed out after 500ms 🚫
 
-**流程图**：
-
-```mermaid
-flowchart TB
-    A["tools/execute 插件（超时）"] --> B{"工具声明 timeoutMs?"}
-    B -->|否| C["next() 不管"]
-    B -->|是| D["deadline(signal, timeoutMs, TOOL_TIMEOUT)<br/>派生带截止信号"]
-    D --> E["exec.signal = d.signal<br/>（仅此阶段允许换信号）"]
-    E --> F["await next() 跑工具体"]
-    F --> G{"d.timedOut()?"}
-    G -->|是| H["替换成结构化 TOOL_TIMEOUT 错误"]
-    G -->|否| I["原结果"]
-    H --> J["finally: exec.signal = upstream<br/>post-execute 看不到我们的信号"]
-    I --> J
-```
-
-**核心代码**（自包含）：
-
-```ts
-interface ToolExec {
-  readonly name: string
-  readonly args: unknown
-  signal: AbortSignal
-} // 唯一可变字段：signal
-
-/** 派生带截止时间的信号：到点自动 abort，code 区分"是谁的计时器" */
-function deadline(signal: AbortSignal, timeoutMs: number, code: string) {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(code), timeoutMs)
-  const onCallerAbort = (): void => controller.abort(signal.reason)
-  if (signal.aborted) controller.abort(signal.reason)
-  else signal.addEventListener('abort', onCallerAbort, { once: true })
-  return {
-    signal: controller.signal,
-    timedOut: () => controller.signal.reason === code,
-    dispose: () => {
-      clearTimeout(timer)
-      signal.removeEventListener('abort', onCallerAbort)
-    },
-  }
-}
-
-// 注册超时插件（挂在 wrappers 上；wrappers 见公共骨架）
-wrappers.push(async (exec, next) => {
-  const timeoutMs = registry.get(exec.name)?.timeoutMs
-  if (timeoutMs === undefined) return next() // 没声明预算就不管
-  const d = deadline(exec.signal, timeoutMs, 'TOOL_TIMEOUT')
-  const upstream = exec.signal
-  exec.signal = d.signal // 换信号（仅此阶段允许）
-  try {
-    const result = await next() // 跑工具体（工具应尊重新信号）
-    return d.timedOut()
-      ? {
-          isError: true,
-          content: `Error: tool call timed out after ${timeoutMs}ms`,
-          error: { code: 'TOOL_TIMEOUT' },
-        }
-      : result
-  } finally {
-    d.dispose()
-    exec.signal = upstream // 用完恢复：post-execute 看不到我们的信号
-  }
-})
-```
-
-**实测输出**：
-
-```text
-⏱️ 超时环绕包装：tools/execute 插件（复刻 timeout-policy）
-----------------------------------------
-① slow_api（30ms < 100ms 预算）→ code=-  "result = api responded"
-② very_slow_api（300ms > 100ms）→ code=TOOL_TIMEOUT  "Error: tool call timed out after 100ms"
-③ fast（无预算）→ code=-  "result = instant"
-```
-
-**看什么**：② 超时后工具依然在跑（尊重信号的工具会在 abort 时立刻 settle）——`finally` 里恢复上游信号，保证 post-execute 阶段看不到超时插件的信号，不会误判归因；上游取消（早于超时）走 ABORTED 而不是误报 TOOL_TIMEOUT。
-
-### Step 07：并行/独占调度（滚动池 + 独占屏障 + 提交保序）
-
-**这一步验证什么**：文章「并行/独占调度」三条铁律——只有 body 能重叠；启动前重新分类；head-of-line 保序提交。
-
-**流程图**：
-
-```mermaid
-flowchart TB
-    A["runGroup(calls, maxParallel=2)"] --> B["fillPool: 滚动池<br/>最多 2 个在飞"]
-    B --> C{"executionMode?"}
-    C -->|parallel| D["startCall 启动<br/>body 重叠"]
-    C -->|exclusive| E["🚧 屏障：等池子排空<br/>单独执行"]
-    D --> F["commitReady: head-of-line<br/>只推进连续 settled 槽位"]
-    E --> F
-    F --> G["提交顺序 = 模型顺序"]
-```
-
-**核心代码**（自包含）：
-
-```ts
-interface PlannedCall {
-  id: string
-  name: string
-  args: unknown
-}
-interface ToolDef {
-  execute: (args: unknown, signal: AbortSignal) => Promise<unknown>
-  isConcurrencySafe?: (args: unknown) => boolean
-}
-
-/** 分类：fail-closed，只有精确 true 是 parallel（抛异常/非 true = 独占） */
-function executionMode(name: string, args: unknown): 'parallel' | 'exclusive' {
-  const tool = registry.get(name)
-  if (!tool?.isConcurrencySafe) return 'exclusive'
-  try {
-    return tool.isConcurrencySafe(args) === true ? 'parallel' : 'exclusive'
-  } catch {
-    return 'exclusive'
-  }
-}
-
-async function runGroup(calls: PlannedCall[], maxParallel: number): Promise<void> {
-  const slots: ({ exec: PlannedCall; result: ToolResult; settled: boolean } | undefined)[] =
-    calls.map(() => undefined)
-  const inFlight = new Map<number, Promise<void>>()
-  let nextToStart = 0
-  let committed = 0
-
-  const commitReady = async (): Promise<void> => {
-    // 铁律 3：head-of-line
-    while (committed < calls.length) {
-      const slot = slots[committed]
-      if (slot === undefined || !slot.settled) break // 前面没结算就等
-      committed++
-    }
-  }
-  const startCall = async (index: number): Promise<void> => {
-    const call = calls[index]!
-    const promise = (async () => {
-      // 只有 body 阶段与兄弟重叠
-      const value = await registry.get(call.name)!.execute(call.args, new AbortController().signal)
-      slots[index] = {
-        exec: call,
-        result: { isError: false, content: `${String(value)}` },
-        settled: true,
-      }
-    })()
-    inFlight.set(index, promise)
-    await promise.finally(() => inFlight.delete(index))
-  }
-  const fillPool = async (): Promise<void> => {
-    // 铁律 2：启动前重新分类
-    while (nextToStart < calls.length && inFlight.size < maxParallel) {
-      if (executionMode(calls[nextToStart]!.name, calls[nextToStart]!.args) === 'exclusive') break // 独占 = 屏障
-      await startCall(nextToStart)
-      nextToStart++
-    }
-  }
-  // 主循环：fillPool → 等任意一个完成 → commitReady → 处理独占屏障
-  await fillPool()
-  while (nextToStart < calls.length || inFlight.size > 0) {
-    if (inFlight.size > 0) {
-      await Promise.race(inFlight.values())
-      await commitReady()
-      continue
-    }
-    const call = calls[nextToStart]! // 池子空了：独占调用单独跑
-    await startCall(nextToStart)
-    nextToStart++
-    await commitReady()
-  }
-  await commitReady()
-}
-```
-
-**实测输出**（真实时间线）：
-
-```text
-🧵 并行/独占调度：滚动池(max=2) + 独占屏障 + 保序提交
-----------------------------------------
-模型顺序: call_1(read) call_2(search) call_3(write=独占) call_4(bash=独占) call_5(grep)
-
- 🏊 [1ms] 并行 call_1 (read) 进入滚动池
- 🏊 [1ms] 并行 call_2 (search) 进入滚动池
- ✅ [311ms] 结算 call_2 (search): found TODO
- 🏊 [311ms] 并行 call_5 (grep) 进入滚动池
- ✅ [517ms] 结算 call_5 (grep): grep FIXME: 3 matches
- ✅ [816ms] 结算 call_1 (read): read a.ts
- 📦 [817ms] 提交 call_1 → call_2 → call_5（head-of-line：call_1 先结算才能提交）
- 🚧 [817ms] 屏障：call_3 (write) 单独执行（等池子排空）
- ✅ [1321ms] 结算 call_3 (write): wrote b.ts
- 🚧 [1321ms] 屏障：call_4 (bash) 单独执行
- ✅ [1731ms] 结算 call_4 (bash): bash output
-
-⏱️ 总耗时 1732ms（若全串行约 2200ms，并行省下约 500ms）
-
-🧪 fail-closed 分类：isConcurrencySafe 抛异常 → 按独占处理（绝不冒险并行）
-   flaky 的分类结果: exclusive ✅
-
-🛑 取消演示：250ms 时取消，池里已有 2 个在飞，第 3 个（独占）未启动
- 🏊 并行 k1 (read) / k2 (read_fast) 进入滚动池
- ✅ k1/k2 结算: Error: tool call aborted（已启动 → drain 完 → ABORTED）
- ⏭️ k3 未启动 → 合成 ABORTED_BEFORE_DISPATCH 写进日志（回放不留"调用了却没结果"的洞）
+🎯 六道关协作：物化定型 → 审批问人 → 守卫兜底 → 环绕限时 → 脱敏把关 → 收尾
 ```
 
 **看什么**（三条最容易忽略的证据）：
 
-- call_2/call_5 比 call_1 先结算，但提交必须等 call_1 先提交（head-of-line 保序）——模型看到的结果顺序永远等于它请求的顺序
-- 独占 call_3/call_4 要等池子**全部排空**才启动，形成屏障
-- 取消时已启动的 drain 完变 ABORTED，未启动的合成 ABORTED_BEFORE_DISPATCH 写进日志（源码 `appendSkippedToolCall`）——回放不会看到"调用了却没结果"的洞
+- **场景 3 是协作的精髓**：审批放行 ≠ 守卫放行——人类点「允许」只代表"人同意"，不代表"策略允许"，红线永远由守卫兜底
+- **短路传播**：任何一道关都能独立终止（deny / 拒绝 / 超时），终止后后面的关不再执行
+- **结果统一过门**：即使一切正常，结果也要经 post-execute 脱敏（场景 1 的 api_key 被替换）——六道关全程无死角
 
-**7 步跑通的收获**：纸上读源码和亲手跑一遍是两种理解。Step 05③ 的 quiescence 等待、Step 06② 的 TOOL_TIMEOUT、Step 07 的提交顺序——这些真实输出把"协作式取消""不竞速""保序"从抽象原则变成了可触摸的事实。跑代码时遇到任何一个"意外"输出，都值得回去翻对应源码：那不是 bug，是某个设计决策的边界。
+**7 步跑通的收获**：纸上读源码和亲手跑一遍是两种理解。Step 02 的冻结 TypeError、Step 03 的 fail-closed 拒绝、Step 04 的反例、Step 07 的审批放行后被守卫拦截——这些真实输出把"审计自证""单调性""fail-closed""横切关注点"从抽象原则变成了可触摸的事实。跑代码时遇到任何一个"意外"输出，都值得回去翻对应源码：那不是 bug，是某个设计决策的边界。
+
+> 💡 **与原 7 步版的差异**：旧版每步叠加多个机制（step-02 同时含物化 + token + 骨架），新版每步只解决一个哲学点，取消体系（ABORTED / ABORTED_BEFORE_DISPATCH）和并行/独占调度（滚动池 + 屏障 + 保序提交）未在复现中展开——它们对应源码 `cooperative-tool-cancellation`（07-19）和 `parallel-tool-call-execution`（07-10）两篇设计笔记，文章上半部分已讲解，可回到源码深挖。
 
 ## 回头看：这套管线在设计上反复出现的六个原则
 

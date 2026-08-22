@@ -11,6 +11,8 @@ DeepSeek Harness（v0.1.0-rc.5，2026-08-13 开源，MIT）是 DeepSeek 官方�
 | 篇目                 | 内容                                                                      | 飞书完整版（含渲染图）                                            | 本地 Markdown                                                      |
 | -------------------- | ------------------------------------------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------------------ |
 | 第一篇：Agent 主循环 | turn/step 双层循环、消息注入、max-tokens 粘性、工具并发调度、Phase 状态机 | [飞书文档](https://my.feishu.cn/docx/BmMsdkoDCoId9rxFSaAcOUEhngb) | [docs/dsh-agent-loop-analysis.md](docs/dsh-agent-loop-analysis.md) |
+| 第二篇：工具调用管线 | 六段执行管线、参数物化、单调守卫、取消体系、并行/独占调度                 | [飞书文档](https://my.feishu.cn/docx/BCryd1dmDouDjbxHbdLcLAWUnUd) | [docs/dsh-tools-analysis.md](docs/dsh-tools-analysis.md)           |
+| 第三篇：记忆管理     | 事件日志、surface 投影、压力检测、checkpoint 压缩、KV cache 复用          | [飞书文档](https://my.feishu.cn/docx/TfeGdEouco5KmMxeT7ocmEctnyd) | [docs/dsh-memory-analysis.md](docs/dsh-memory-analysis.md)         |
 | 第四篇：上下文管理   | SystemPrompt 注册表、快照投影（变了才说）、四类上下文插件、装配纪律       | [飞书文档](https://my.feishu.cn/docx/MVeZd2Ttso3qmqxUPq7c9RQDnzc) | [docs/dsh-context-analysis.md](docs/dsh-context-analysis.md)       |
 
 > 飞书版含完整渲染的主循环全景图（mermaid），建议优先阅读。
@@ -28,6 +30,30 @@ DeepSeek Harness（v0.1.0-rc.5，2026-08-13 开源，MIT）是 DeepSeek 官方�
 | Step 05 | [steps/step-05-kick-wake.ts](articles/dsh-agent-loop/src/steps/step-05-kick-wake.ts)                       | **外部驱动 + Phase**：kick/wake + idle↔running + latch   | `pnpm run step:05` |
 | Step 06 | [steps/step-06-pre-step.ts](articles/dsh-agent-loop/src/steps/step-06-pre-step.ts)                         | **preStep 决策点**：claim + waterfall + reject           | `pnpm run step:06` |
 | Step 07 | [steps/step-07-full.ts](articles/dsh-agent-loop/src/steps/step-07-full.ts)                                 | **完整版**：整合前 6 步 + 三种消息注入 + 诊断            | `pnpm run step:07` |
+
+> 📖 **精读二《工具调用管线》配套复现**（`articles/dsh-tools/`）：每步只解决一个哲学点——为什么这么设计、好处是什么：
+
+| 步骤    | 文件名                                                                                      | 学到什么                                                  | 跑法                     |
+| ------- | ------------------------------------------------------------------------------------------- | --------------------------------------------------------- | ------------------------ |
+| Step 01 | [step-01-pipeline-skeleton.ts](articles/dsh-tools/src/steps/step-01-pipeline-skeleton.ts)   | **管线骨架**：工具调用 ≠ 调函数，六道关地图               | `pnpm run tools:step:01` |
+| Step 02 | [step-02-arg-freezing.ts](articles/dsh-tools/src/steps/step-02-arg-freezing.ts)             | **参数物化**：参数一进管线就定型，审计自证靠冻结          | `pnpm run tools:step:02` |
+| Step 03 | [step-03-approval-waterfall.ts](articles/dsh-tools/src/steps/step-03-approval-waterfall.ts) | **审批瀑布**：危险工具要问人，无通道也拒绝（fail-closed） | `pnpm run tools:step:03` |
+| Step 04 | [step-04-monotonic-guard.ts](articles/dsh-tools/src/steps/step-04-monotonic-guard.ts)       | **单调守卫**：只能拒绝不能放行，拒绝永远是终局            | `pnpm run tools:step:04` |
+| Step 05 | [step-05-timeout-wrap.ts](articles/dsh-tools/src/steps/step-05-timeout-wrap.ts)             | **超时环绕**：横切关注点包一层，注册即获得                | `pnpm run tools:step:05` |
+| Step 06 | [step-06-post-execute.ts](articles/dsh-tools/src/steps/step-06-post-execute.ts)             | **post-execute**：输出同输入一样不可信，结果也要过门      | `pnpm run tools:step:06` |
+| Step 07 | [step-07-full-pipeline.ts](articles/dsh-tools/src/steps/step-07-full-pipeline.ts)           | **完整协作**：六道关衔接、短路传播、审批放行 ≠ 守卫放行   | `pnpm run tools:step:07` |
+
+> 📖 **精读三《记忆管理》配套复现**（`articles/dsh-memory/`）：7 步渐进，从事件日志一路拼到完整链路：
+
+| 步骤    | 文件名                                                                           | 学到什么                                             | 跑法                      |
+| ------- | -------------------------------------------------------------------------------- | ---------------------------------------------------- | ------------------------- |
+| Step 01 | [step-01-session-log.ts](articles/dsh-memory/src/steps/step-01-session-log.ts)   | **事件日志**：append-only 唯一事实源，历史只是派生   | `pnpm run memory:step:01` |
+| Step 02 | [step-02-surface.ts](articles/dsh-memory/src/steps/step-02-surface.ts)           | **surface 投影**：模型看到的只是日志的投影，不存副本 | `pnpm run memory:step:02` |
+| Step 03 | [step-03-pressure.ts](articles/dsh-memory/src/steps/step-03-pressure.ts)         | **压力检测**：什么时候该压缩，按 token 压力触发      | `pnpm run memory:step:03` |
+| Step 04 | [step-04-checkpoint.ts](articles/dsh-memory/src/steps/step-04-checkpoint.ts)     | **checkpoint**：折叠旧历史 + 摘要，压缩后仍可回溯    | `pnpm run memory:step:04` |
+| Step 05 | [step-05-kv-cache.ts](articles/dsh-memory/src/steps/step-05-kv-cache.ts)         | **KV cache 复用**：总结指令复用前缀，省 token        | `pnpm run memory:step:05` |
+| Step 06 | [step-06-write-behind.ts](articles/dsh-memory/src/steps/step-06-write-behind.ts) | **write-behind**：append 不阻塞 I/O，异步持久化      | `pnpm run memory:step:06` |
+| Step 07 | [step-07-full-chain.ts](articles/dsh-memory/src/steps/step-07-full-chain.ts)     | **完整链路**：日志 → 投影 → 压缩 → 持久化全流程      | `pnpm run memory:step:07` |
 
 > 📖 **精读四《上下文管理》配套复现**（`articles/dsh-context/`）：同样 7 步渐进，从 SystemPrompt 注册表一路拼到完整 pre-step 装配链：
 

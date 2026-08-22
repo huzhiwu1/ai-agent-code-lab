@@ -2,16 +2,16 @@
   "name": "@articles/dsh-tools",
   "version": "1.0.0",
   "private": true,
-  "description": "简化版 ToolRuntime – 复现 DeepSeek Harness 工具调用六段执行管线核心机制（7 步渐进，纯 Node 无依赖）",
+  "description": "工具调用管线设计哲学渐进式复现：六道关逐关理解（参数冻结/审批瀑布/单调守卫/超时环绕/post-execute），纯 Node 无依赖",
   "scripts": {
-    "start": "tsx src/steps/step-07-parallel-scheduler.ts",
-    "run:dsh-tools": "tsx src/steps/step-07-parallel-scheduler.ts",
-    "step:01": "tsx src/steps/step-01-minimal-pipeline.ts",
-    "step:02": "tsx src/steps/step-02-arg-materialization.ts",
-    "step:03": "tsx src/steps/step-03-approval-pipeline.ts",
-    "step:04": "tsx src/steps/step-04-monotonic-guards.ts",
-    "step:05": "tsx src/steps/step-05-cooperative-cancel.ts",
-    "step:06": "tsx src/steps/step-06-timeout-policy.ts",
-    "step:07": "tsx src/steps/step-07-parallel-scheduler.ts"
+    "start": "tsx src/steps/step-07-full-pipeline.ts",
+    "run:dsh-tools": "tsx src/steps/step-07-full-pipeline.ts",
+    "step:01": "tsx src/steps/step-01-pipeline-skeleton.ts",
+    "step:02": "tsx src/steps/step-02-arg-freezing.ts",
+    "step:03": "tsx src/steps/step-03-approval-waterfall.ts",
+    "step:04": "tsx src/steps/step-04-monotonic-guard.ts",
+    "step:05": "tsx src/steps/step-05-timeout-wrap.ts",
+    "step:06": "tsx src/steps/step-06-post-execute.ts",
+    "step:07": "tsx src/steps/step-07-full-pipeline.ts"
   }
 }
