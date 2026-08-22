@@ -1,0 +1,17 @@
+{
+  "name": "@articles/dsh-context",
+  "version": "1.0.0",
+  "private": true,
+  "description": "简化版上下文管理系统 – 复现 DeepSeek Harness 上下文管理三层机制核心（SystemPrompt 注册表/快照投影/四类上下文插件，7 步渐进，纯 Node 无依赖）",
+  "scripts": {
+    "start": "tsx src/steps/step-07-session-reference-full-assembly.ts",
+    "run:dsh-context": "tsx src/steps/step-07-session-reference-full-assembly.ts",
+    "step:01": "tsx src/steps/step-01-system-prompt-registry.ts",
+    "step:02": "tsx src/steps/step-02-scope-and-variables.ts",
+    "step:03": "tsx src/steps/step-03-waterfall-complete.ts",
+    "step:04": "tsx src/steps/step-04-runtime-context-snapshot.ts",
+    "step:05": "tsx src/steps/step-05-agent-instructions.ts",
+    "step:06": "tsx src/steps/step-06-time-tmux-context.ts",
+    "step:07": "tsx src/steps/step-07-session-reference-full-assembly.ts"
+  }
+}

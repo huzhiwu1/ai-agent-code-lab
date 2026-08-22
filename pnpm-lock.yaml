@@ -54,17 +54,15 @@ importers:
         specifier: ^17.4.2
         version: 17.4.2
 
+  articles/dsh-context: {}
+
   articles/dsh-memory:
     devDependencies:
       tsx:
         specifier: ^4.20.0
         version: 4.23.12
 
-  articles/dsh-tools:
-    devDependencies:
-      tsx:
-        specifier: ^4.20.0
-        version: 4.23.12
+  articles/dsh-tools: {}
 
 packages:
 

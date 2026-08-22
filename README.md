@@ -11,6 +11,7 @@ DeepSeek Harness（v0.1.0-rc.5，2026-08-13 开源，MIT）是 DeepSeek 官方�
 | 篇目                 | 内容                                                                      | 飞书完整版（含渲染图）                                            | 本地 Markdown                                                      |
 | -------------------- | ------------------------------------------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------------------ |
 | 第一篇：Agent 主循环 | turn/step 双层循环、消息注入、max-tokens 粘性、工具并发调度、Phase 状态机 | [飞书文档](https://my.feishu.cn/docx/BmMsdkoDCoId9rxFSaAcOUEhngb) | [docs/dsh-agent-loop-analysis.md](docs/dsh-agent-loop-analysis.md) |
+| 第四篇：上下文管理   | SystemPrompt 注册表、快照投影（变了才说）、四类上下文插件、装配纪律       | [飞书文档](https://my.feishu.cn/docx/MVeZd2Ttso3qmqxUPq7c9RQDnzc) | [docs/dsh-context-analysis.md](docs/dsh-context-analysis.md)       |
 
 > 飞书版含完整渲染的主循环全景图（mermaid），建议优先阅读。
 
@@ -27,6 +28,18 @@ DeepSeek Harness（v0.1.0-rc.5，2026-08-13 开源，MIT）是 DeepSeek 官方�
 | Step 05 | [steps/step-05-kick-wake.ts](articles/dsh-agent-loop/src/steps/step-05-kick-wake.ts)                       | **外部驱动 + Phase**：kick/wake + idle↔running + latch   | `pnpm run step:05` |
 | Step 06 | [steps/step-06-pre-step.ts](articles/dsh-agent-loop/src/steps/step-06-pre-step.ts)                         | **preStep 决策点**：claim + waterfall + reject           | `pnpm run step:06` |
 | Step 07 | [steps/step-07-full.ts](articles/dsh-agent-loop/src/steps/step-07-full.ts)                                 | **完整版**：整合前 6 步 + 三种消息注入 + 诊断            | `pnpm run step:07` |
+
+> 📖 **精读四《上下文管理》配套复现**（`articles/dsh-context/`）：同样 7 步渐进，从 SystemPrompt 注册表一路拼到完整 pre-step 装配链：
+
+| 步骤    | 文件名                                                                                                                  | 学到什么                                                               | 跑法                       |
+| ------- | ----------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- | -------------------------- |
+| Step 01 | [step-01-system-prompt-registry.ts](articles/dsh-context/src/steps/step-01-system-prompt-registry.ts)                   | **注册表**：section 分区 + order 排序 + 拼接渲染（取代手写大坨字符串） | `pnpm run context:step:01` |
+| Step 02 | [step-02-scope-and-variables.ts](articles/dsh-context/src/steps/step-02-scope-and-variables.ts)                         | **scope 遮蔽 + 严格插值**：per-agent prompt、{{变量}} typo 直接炸      | `pnpm run context:step:02` |
+| Step 03 | [step-03-waterfall-complete.ts](articles/dsh-context/src/steps/step-03-waterfall-complete.ts)                           | **waterfall + complete**：专家插件改写 prompt、complete 整体接管       | `pnpm run context:step:03` |
+| Step 04 | [step-04-runtime-context-snapshot.ts](articles/dsh-context/src/steps/step-04-runtime-context-snapshot.ts)               | **快照投影**：变了才注入、CLEARED 作废标记、压缩后自动补发             | `pnpm run context:step:04` |
+| Step 05 | [step-05-agent-instructions.ts](articles/dsh-context/src/steps/step-05-agent-instructions.ts)                           | **AGENTS.md 动态注入**：基线 + set/replace/remove 增量 + 字节预算      | `pnpm run context:step:05` |
+| Step 06 | [step-06-time-tmux-context.ts](articles/dsh-context/src/steps/step-06-time-tmux-context.ts)                             | **时间/位置上下文**：请求时钟、伪 tmux 检测、变化驱动重注入            | `pnpm run context:step:06` |
+| Step 07 | [step-07-session-reference-full-assembly.ts](articles/dsh-context/src/steps/step-07-session-reference-full-assembly.ts) | **跨会话引用 + 全家桶**：不可信警告、tag-safe、完整 pre-step 装配链    | `pnpm run context:step:07` |
 
 每个步骤文件顶部都有「学习目标」+「对应源码位置」，跑完一步看输出，再进下一步——这就是从 0 理解主循环的路径。
 
