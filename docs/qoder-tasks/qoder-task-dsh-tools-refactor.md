@@ -1,22 +1,15 @@
-# Qoder 任务：重构 articles/dsh-tools —— 从"7 步渐进式复现"改为"设计哲学 + AB 对比 demo"
+# Qoder 任务：重构 articles/dsh-tools —— 渐进式理解设计哲学（每步一个哲学点）
 
 ## 为什么改（背景）
 
-用户反馈：ai-agent-code-lab 里 dsh-tools 的 7 步渐进式复现（7 个文件共约 2400 行）太重了，学习负担大。用户的核心诉求不是"从 0 实现 DeepSeek Harness 的全部能力"，而是**理解它的设计哲学**——为什么这么设计、有什么好处。dsh-agent-loop 能看懂是因为顺序逻辑符合直觉；工具管线的机制都是反直觉的（参数要冻结、守卫只能拒绝不能放行），必须先讲"不这么做会崩在哪"，再给最小代码。
+用户反馈：ai-agent-code-lab 里 dsh-tools 的 7 步渐进式复现（7 个文件共约 2400 行）太重了，学习负担大。问题不在"渐进式"这个形式（step-1~N 是好的），而在**节奏**——旧版每步塞了太多机制：step-02 一个文件里既有六段骨架又有参数物化又有 token 身份，读者一次要消化多个概念。
 
-**新形态：每个知识域 = 一页哲学讲解 + 1~2 个最小 AB 对比 demo**（追求精简，不写死行数，能讲清设计哲学即可）。同一场景跑两遍——朴素版（直接调函数）vs 管线版（harness 六段管线），输出对比，一眼看出设计好处。
-
-## 精简原则（重要，避免你写完又反复自我压缩）
-
-- **不写死具体行数**，以"讲透设计哲学"为准，尽量精简，但不是牺牲可读性去压行数——写完就是终稿，不要回头反复压缩
-- **明确可省略的内容**（这些可一笔带过或不写）：取消体系 ABORTED 两种状态、并行调度、Scope 可见性、Code Mode、token 身份 brand type 的完整实现——这些不是本次核心，注释里提一句即可
-- **必须写的内容**：参数物化（冻结）、审批瀑布、单调守卫、超时环绕、post-execute 脱敏——这是本次要传达的哲学核心
-- **给你发挥空间**：演示场景、console 输出文案、代码组织方式（一个文件还是拆两个）你自行决定，只要满足"AB 对比清晰 + 教学性强"
+**保留 step-1~N 渐进式格式，但每步只解决一个问题**：一个小 step 讲透一个设计哲学点——为什么这么设计、好处是什么、哲学思想是什么、解决了什么问题、带来什么收益。宁可每步小而精，不要一步大而全。
 
 ## 你的角色（三重身份）
 
 1. **资深 AI Agent 工程师**：代码体现生产级设计取舍，不追求覆盖全部机制，只挑"最能说明设计哲学"的核心机制
-2. **AI Agent 教学老师**：读者是**有前端经验但刚学 Agent 的初学者**。注释讲清楚"这一步在解决什么问题、不这么做会怎样"，输出教学性结果
+2. **AI Agent 教学老师**：读者是**有前端经验但刚学 Agent 的初学者**。每步注释讲清"这一步在解决什么问题、不这么做会怎样、为什么 harness 这么设计、收益是什么"
 3. **DeepSeek Harness 资深源码研究者**：简化实现忠实于真实源码的机制和命名，注释标注对应源码文件:行号
 
 ## 必读材料（动笔前先读）
@@ -31,60 +24,96 @@
 2. **分析文档的哲学讲解**：`docs/dsh-tools-analysis.md`（重点看六段管线每站的"为什么"、取消体系、并行调度、回头看六原则）
 3. **真实源码**（对照核实）：`~/workspace/deepseek-harness-study/source/packages/core/tools/src/index.ts`（createExecution / pre-execute / ToolGuard / tools/execute 环绕 / post-execute / finalizeContent）
 
-## 核心设计哲学（demo 必须传达的，按优先级）
+## 精简原则（重要，避免你写完又反复自我压缩）
 
-1. **参数物化**：参数先在历史/审计/UI 出现过，执行时改参数 → 三个读者三个版本。所以快照 + 递归冻结 + 不透明 token，有损参数（undefined/函数/循环引用）fail-closed 拒绝
-2. **pre-execute 审批瀑布**：allow / deny / ask 三态，任一 hook 短路即终止——模型不能直接执行危险工具
-3. **单调守卫**：守卫只能返回拒绝理由（string | undefined），**没有 allow 分支**——"listener ordering cannot turn a denial back into permission"，注册顺序永远不会把拒绝翻回许可
-4. **execute 环绕 + 超时**：超时是"包一层"，不是工具自己实现的——任何工具自动获得超时能力
-5. **post-execute 接受/替换/阻止**：执行结果也要过一道门（值校验、脱敏、重渲染）
-6. **取消体系**：ABORTED（执行中被取消）vs ABORTED_BEFORE_DISPATCH（还没开始就被取消）——区分"做到一半"和"压根没做"
+- **不写死具体行数**，以"讲透一个哲学点"为准。每步聚焦一个问题，代码量自然会小；写完就是终稿，不要回头反复压缩
+- **可省略的内容**（一笔带过或不写）：取消体系 ABORTED 两种状态的完整实现、并行调度、Scope 可见性、Code Mode、token 身份 brand type——这些不是本次核心，注释里提一句"源码里还有 XXX，这里不展开"即可
+- **必须写的内容**：六段管线骨架、参数物化（冻结）、审批瀑布、单调守卫、超时环绕、post-execute 脱敏——这是本次要传达的哲学核心
+- **给你发挥空间**：每个 step 的演示场景、console 输出文案、如何复用前一步的代码（精简复用 or 独立自足）你自行决定，只要满足"每步一个哲学点 + 教学性强"
 
-## 任务：重写 articles/dsh-tools
+## 任务：重构 articles/dsh-tools
 
 ### 新目录结构
 
 ```
 articles/dsh-tools/
 ├── package.json          # 更新 scripts（见下）
-├── README.md             # 可选：一句话说明本包是什么
 └── src/
-    ├── demo-01-naive.ts      # 朴素版：直接调函数，展示四个崩点
-    └── demo-02-pipeline.ts   # 管线版：六段管线最小实现，同一场景，展示 harness 怎么救
+    └── steps/            # 保留 step-1~N 渐进式格式（与 dsh-agent-loop/dsh-memory/dsh-context 一致）
+        ├── step-01-pipeline-skeleton.ts    # 六段管线骨架
+        ├── step-02-arg-freezing.ts         # 参数物化：为什么参数要"冻"起来
+        ├── step-03-approval-waterfall.ts   # 审批瀑布：为什么危险工具要问人
+        ├── step-04-monotonic-guard.ts      # 单调守卫：为什么守卫只能拒绝
+        ├── step-05-timeout-wrap.ts         # 超时环绕：为什么超时是"包一层"
+        ├── step-06-post-execute.ts         # post-execute：为什么结果也要过一道门
+        └── step-07-full-pipeline.ts        # 整合：一次工具调用的完整旅程（串联前六步）
 ```
 
-**删除原 `src/steps/` 目录**（git 历史可恢复，不用留 archive）。
+**替换原 `src/steps/` 下的 7 个旧文件**（git 历史可恢复，不用留 archive）。
 
-### demo-01-naive.ts（朴素版）
+### 每步的"哲学点"规格（渐进节奏，逐步深入）
 
-**学习目标**：先看到"没有管线"的世界有多危险——为 demo-02 的每一道关做铺垫。
+#### Step 01 — `step-01-pipeline-skeleton.ts`
 
-演示场景：一个 agent 要调用两个工具 `read_file`（读文件）和 `delete_file`（删文件）。
+**哲学点：工具调用 ≠ 调个函数——为什么要引入"管线"这个概念？**
 
-朴素实现就是 `registry.get(name)(args)` 直接调。**四个崩点逐个演示**（每个崩点 console.log 输出"发生了什么 + 为什么危险"）：
+- 问题：模型说"调工具"，如果直接 `registry.get(name)(args)`，会有什么问题？（提示：安全、可靠性、审计，先提出问题不解决）
+- 实现：最小六段骨架（参数物化 → pre-execute → 守卫 → execute 环绕 → post-execute → 最终化），数组模拟 Cordis 瀑布，每段留注释说明"这一站未来要干什么"
+- 好处：先建立"一次工具调用要过六道关"的地图，后面每步填实一道关
+- 对应源码：`packages/core/tools/src/index.ts` 的 execute() 主流程
 
-1. **参数被改**：调用方传入 args 对象，工具执行是异步的，在 await 期间外部把 `args.path` 改了 → 工具执行用的不是"被展示给用户/记入日志"的那份参数（演示：先打印"模型说要删 A"，await 中改成 B，实际删了 B）——**审计无法自证**
-2. **无审批**：`delete_file` 直接执行，没有任何人确认——模型被 prompt injection 诱导时直接删库跑路
-3. **超时挂死**：一个慢工具（模拟 5s），没有超时，调用方无限等待——单次卡死拖垮整个 agent
-4. **无取消**：无法在工具执行中取消——用户说"停"也没用
+#### Step 02 — `step-02-arg-freezing.ts`
 
-输出格式：每个崩点一段 `💥 崩点 N：标题` + 现象 + 一句"这就是为什么需要 XXX"。
+**哲学点：为什么参数要"冻"起来？（物化）**
 
-### demo-02-pipeline.ts（管线版）
+- 问题：参数已经出现在历史/审计/UI 里，执行时若允许改参数 → 三个读者三个版本，审计无法自证"当时到底执行了什么"
+- 实现：JSON 化无损验证 + 快照克隆 + 递归冻结 + 不透明 token 身份；演示"调用方 await 期间改原对象 → 执行用的是冻结快照"
+- 哲学：**执行身份隔离**——fail-closed，有损参数（undefined/函数/循环引用）在物化阶段就拒绝
+- 对应源码：createExecution() / snapshotJsonValue() / deepFreeze() / createExecutionToken()
 
-**学习目标**：用最小六段管线把 demo-01 的四个崩点逐个救回来——看到每道关存在的理由。
+#### Step 03 — `step-03-approval-waterfall.ts`
 
-实现要点（忠实源码语义，简化 Cordis 为数组）：
+**哲学点：为什么模型不能直接执行危险工具？（审批瀑布）**
 
-- 六段结构：① 参数物化（JSON 化验证 + 快照 + deepFreeze + 不透明 token）→ ② pre-execute 瀑布（allow/deny/ask）→ ③ 单调守卫（只能拒绝）→ ④ execute 环绕（超时包装）→ ⑤ post-execute → ⑥ 最终化返回
-- 注册表强制 `output` 声明（schema + render），未知工具返回 isError 而不是崩溃
-- 演示流程（与 demo-01 同一场景、同一批调用，形成对照）：
-  1. **参数物化**：调用方在 await 期间改原对象 → 执行用的是冻结快照，不受影响；打印"参数已冻结，外部修改无效"
-  2. **审批**：`delete_file` 注册时声明需要审批 → pre-execute 返回 ask → 演示"挂起等待用户确认"（简化：确认后放行，拒绝则终止）；`read_file` 不需要审批直接放行
-  3. **守卫**：注册一个守卫"禁止删除 `AGENTS.md`"→ 尝试删 `AGENTS.md` 被拒；再演示守卫无 allow 分支（类型上只有 string | undefined），注释解释为什么
-  4. **超时**：慢工具包上 500ms 超时 → 超时返回 isError，调用方不挂死
-  5. **post-execute**：`read_file` 结果经 post-execute 脱敏（把内容里的密钥 `sk-xxx` 替换成 `***`）→ 演示结果被改写
-- 输出格式：每个救场一段 `✅ 救场 N：标题` + 现象 + 一句"这就是 XXX 的设计"。
+- 问题：模型被 prompt injection 诱导时，delete_file 这种危险工具会被直接执行
+- 实现：pre-execute 瀑布 allow / deny / ask 三态，任一 hook 短路即终止；演示 delete_file 挂起等确认（简化：确认放行 / 拒绝终止），read_file 直接放行
+- 哲学：**人类监督点**——把"要不要执行"从模型手里拿出来，交给政策
+- 对应源码：pre-execute 瀑布（allow/deny/ask）+ 审批服务
+
+#### Step 04 — `step-04-monotonic-guard.ts`
+
+**哲学点：为什么守卫只能"拒绝"，不能"放行"？（单调性）**
+
+- 问题：如果守卫能放行，注册顺序决定"谁说了算"——A 拒绝、B 放行 → 结果变放行，守卫互相踩
+- 实现：ToolGuard 返回类型只有 `string | undefined`（拒绝理由 or 无），**没有 allow 分支**；演示多个守卫注册顺序无关，任何一道拒绝都是终局
+- 哲学：**单调性**——"listener ordering cannot turn a denial back into permission"，拒绝是幂等安全的，放行不是
+- 对应源码：ToolGuard 类型注释（index.ts:708）+ guardReason() 的 scope 链查询（index.ts:1132）
+
+#### Step 05 — `step-05-timeout-wrap.ts`
+
+**哲学点：为什么超时是"包一层"，而不是工具自己实现？（关注点分离）**
+
+- 问题：慢工具无限等待会拖垮整个 agent；如果让每个工具自己写超时，20 个工具 20 份重复代码，且容易漏
+- 实现：execute 环绕（wrapper）用 Promise.race 包超时，任何工具注册后自动获得超时能力；演示慢工具 500ms 超时返回 isError
+- 哲学：**横切关注点**——超时/日志/重试是"包在工具外面"的能力，不该是工具自己的责任
+- 对应源码：tools/execute 环绕（wrapper 机制）
+
+#### Step 06 — `step-06-post-execute.ts`
+
+**哲学点：为什么执行结果也要过一道门？（post-execute）**
+
+- 问题：工具返回的值不一定适合直接给模型看——可能含密钥、可能格式脏、可能违反策略
+- 实现：post-execute 接受/替换/阻止三态；演示 read_file 结果经 post-execute 脱敏（`sk-xxx` → `***`）
+- 哲学：**输出同输入一样不可信**——进出的数据都要过门，结果处理（脱敏/校验/重渲染）和工具逻辑解耦
+- 对应源码：post-execute（接受/替换/阻止）
+
+#### Step 07 — `step-07-full-pipeline.ts`
+
+**哲学点：整合——一次工具调用的完整旅程，六道关如何协作？**
+
+- 实现：把 Step 02~06 的机制串进 Step 01 的骨架，跑一次完整调用（含审批、守卫拒绝、超时、脱敏各演示一次）
+- 好处：读者从"每道关单独看"升级到"看整体协作"——关与关之间如何衔接、短路如何传播
+- 对应源码：execute() 完整主流程
 
 ### package.json scripts
 
@@ -93,25 +122,29 @@ articles/dsh-tools/
   "name": "@articles/dsh-tools",
   "version": "1.0.0",
   "private": true,
-  "description": "工具调用管线设计哲学：朴素版 vs 六段管线版 AB 对比 demo（复现 DeepSeek Harness 工具执行管线核心机制）",
+  "description": "工具调用管线设计哲学渐进式复现：六道关逐关理解（参数冻结/审批瀑布/单调守卫/超时环绕/post-execute），纯 Node 无依赖",
   "scripts": {
-    "start": "tsx src/demo-02-pipeline.ts",
-    "run:dsh-tools": "tsx src/demo-02-pipeline.ts",
-    "demo:naive": "tsx src/demo-01-naive.ts",
-    "demo:pipeline": "tsx src/demo-02-pipeline.ts"
+    "start": "tsx src/steps/step-07-full-pipeline.ts",
+    "run:dsh-tools": "tsx src/steps/step-07-full-pipeline.ts",
+    "step:01": "tsx src/steps/step-01-pipeline-skeleton.ts",
+    "step:02": "tsx src/steps/step-02-arg-freezing.ts",
+    "step:03": "tsx src/steps/step-03-approval-waterfall.ts",
+    "step:04": "tsx src/steps/step-04-monotonic-guard.ts",
+    "step:05": "tsx src/steps/step-05-timeout-wrap.ts",
+    "step:06": "tsx src/steps/step-06-post-execute.ts",
+    "step:07": "tsx src/steps/step-07-full-pipeline.ts"
   }
 }
 ```
 
 ### 根 package.json 清理
 
-- 删除 `tools:step:01` ~ `tools:step:07` 共 7 个脚本
-- 加 `run:dsh-tools`（如已有则保持指向 demo-02-pipeline）
-- 加 `tools:demo:naive` → `tsx articles/dsh-tools/src/demo-01-naive.ts`、`tools:demo:pipeline` → `tsx articles/dsh-tools/src/demo-02-pipeline.ts`
+- `tools:step:01` ~ `tools:step:07` 保留（脚本名不变），指向新的 step 文件名
+- `run:dsh-tools` 指向 `step-07-full-pipeline.ts`
 
 ## 代码风格（严格对齐现有样本）
 
-- 每个文件顶部 JSDoc：**学习目标**（2-4 句，讲清"这一步在解决什么问题"）+ **对应源码**（文件:行号）+ **跑法**
+- 每个文件顶部 JSDoc：**这一步解决什么问题**（痛苦场景，2-3 句）+ **为什么 harness 这么设计**（哲学思想，2-3 句）+ **好处/收益**（1-2 句）+ **对应源码**（文件:行号）+ **跑法**
 - 关键注释标注"对应源码 xxx"；简化实现但机制命名忠于源码
 - 教学性：main() 演示多种情况（正常/异常/边界），console.log 清晰、emoji 前缀（💥✅🚫⏱️ 等）
 - `export {}` 结尾；TS 严格模式友好，能过 ESLint（typescript-eslint + prettier）
@@ -119,24 +152,19 @@ articles/dsh-tools/
 
 ## 验证
 
-写完必须逐个跑通（在 ai-agent-code-lab 根目录）：
-
-- `pnpm run tools:demo:naive`（或 `pnpm run demo:naive`）
-- `pnpm run tools:demo:pipeline`（或 `pnpm run demo:pipeline`）
-- 确认无类型错误、无运行时崩溃、输出有教学价值、两个 demo 形成清晰对照
+写完必须逐个跑通（在 ai-agent-code-lab 根目录）：`pnpm run tools:step:01` ~ `tools:step:07`（或 articles/dsh-tools 内 `pnpm run step:01` ~ `step:07`）。确认无类型错误、无运行时崩溃、每步输出聚焦一个哲学点。
 
 ## 输出要求
 
 1. 直接创建/修改文件，不要只给方案
-2. 跑通验证后报告两个 demo 的输出摘要（各 2-3 行）
-3. 总结：每个救场对应源码的哪个机制、简化了什么——方便 reviewer 核对
+2. 跑通验证后报告每步输出摘要（每步 1-2 行）
+3. 总结：每步对应源码的哪个机制、简化了什么——方便 reviewer 核对
 4. 如有拿不准的源码行为，以真实源码为准并在总结里指出
 
 ## 验收标准
 
-- [ ] `articles/dsh-tools/src/steps/` 已删除，替换为 demo-01-naive.ts + demo-02-pipeline.ts
-- [ ] 精简优先：没有为凑行数注水，也没有压缩到牺牲可读性；注释标注对应源码位置
-- [ ] demo-01 演示 4 个崩点，demo-02 用同一场景逐个救场，输出对照清晰
-- [ ] 核心哲学传达：参数冻结 / 审批瀑布 / 单调守卫（无 allow）/ 超时环绕 / post-execute 脱敏
-- [ ] 根 package.json 的 tools:step:* 已清理，demo 脚本可用
-- [ ] 根目录 `pnpm run tools:demo:naive` 和 `pnpm run tools:demo:pipeline` 都跑通
+- [ ] `src/steps/` 下 7 个新文件，每步**只解决一个哲学点**（无一步塞多个机制的"大杂烩"）
+- [ ] 文件行数合理精简（每步聚焦一个问题，没有为凑数注水、也没有压缩到牺牲可读性）
+- [ ] 每步 JSDoc 包含：问题 / 为什么这么设计 / 好处收益 / 对应源码位置
+- [ ] 核心哲学传达：管线骨架 / 参数冻结 / 审批瀑布 / 单调守卫（无 allow）/ 超时环绕 / post-execute 脱敏 / 整合协作
+- [ ] 根 package.json 的 tools:step:* 指向新文件名，全部跑通
