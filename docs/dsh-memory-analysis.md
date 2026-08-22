@@ -402,6 +402,528 @@ class SessionWriteBehind {
 
 ---
 
+## 🧪 自己动手：7 步渐进式理解记忆系统（代码 + 真实输出）
+
+> 2026-08-22 重构：每步只解决一个哲学点，配**术语先行**（先懂几个词）和 **AB 对比**（朴素版崩点 → harness 版解决）。代码在 `articles/dsh-memory/src/steps/`（ai-agent-code-lab 仓库，纯 Node 实现，不需要 API key）。
+>
+> 跑法二选一：
+>
+> - 根目录：`pnpm run memory:step:01` ~ `memory:step:07`；完整版 `pnpm run run:dsh-memory`
+> - 或在 `articles/dsh-memory/` 目录内：`pnpm run step:01` ~ `step:07`
+
+### Step 01：事件日志——为什么"历史"是派生的，从不单独存储？
+
+**先懂几个词**：**事件日志** = 按时间顺序追加的流水账，每条不可变；**派生** = 模型看到的历史不是存出来的，是从日志算出来的。
+
+**这一步解决什么问题**：如果直接维护一个"消息数组"当历史，聊一句 push 一句——要审计"当时工具传了什么参数"时，数组里只有结果；发现回答有误想改，直接把数组改掉 = 历史被篡改。**日志和"模型看到的历史"之间没有隔离**。
+
+**为什么这么设计**：日志是唯一事实源（append-only，不可变，seq 连续），模型看到的历史是 `deriveMessages()` 纯函数重放的结果——从不单独存储。分叉在结构上不可能。
+
+**收益**：审计有据可查（原始参数还在日志里）、修正靠追加新事件（旧事件原封不动）、断号能被检测（日志不可信就拒绝重放）。
+
+**流程图**：
+
+```mermaid
+flowchart LR
+    A["朴素版：消息数组"] --> B["💥 审计查无实据<br/>💥 修改即篡改"]
+    C["harness 版：append-only 事件日志"] --> D["每条事件不可变 + seq 连续"]
+    D --> E["deriveMessages() 纯函数重放"]
+    E --> F["模型看到的历史（从不单独存储）"]
+```
+
+**核心代码**（`step-01-session-log.ts`）：
+
+```ts
+/** 会话 = append-only 事件日志。没有 update / delete——只提供 append */
+class Session {
+  private log: StoredEvent[] = []
+
+  append(event: SessionEvent): StoredEvent {
+    const stored: StoredEvent = {
+      seq: this.log.length, // seq = 入日志时的长度（连续性契约）
+      time: Date.now(),
+      event: deepFreeze(event), // 深冻结：任何路径都改不动历史
+    }
+    this.log.push(stored)
+    return stored
+  }
+
+  /** 派生消息历史：纯函数重放，从不单独存储 */
+  deriveMessages(): string[] {
+    return this.log
+      .filter(s => /* 只挑三类"模型可见"事件 */)
+      .map(s => `user/assistant/tool: ${s.event.content}`)
+  }
+}
+
+/** 校验 seq 连续：断号 = 日志不可信，拒绝重放 */
+function assertContiguousSeq(log: readonly StoredEvent[]): void {
+  log.forEach((stored, i) => {
+    if (stored.seq !== i) {
+      throw new Error(`seq 断档！期望 ${i}，实际 ${stored.seq}——日志不可信，拒绝重放`)
+    }
+  })
+}
+```
+
+**实测输出**：
+
+```text
+① 朴素版：消息数组当历史
+   数组内容：user → assistant → tool → assistant
+   💥 崩点 1：要审计"当时工具传了什么参数"→ 数组里只有结果，参数查无实据
+   💥 崩点 2：发现 assistant 回答有误，直接改数组 → 原始回答被覆盖，历史被篡改
+
+② harness 版：append-only 事件日志（唯一事实源）
+   日志（每一条都留着，包括工具调用细节）：
+     seq=0  user/message         帮我写一个 debounce 工具函数
+     seq=1  assistant/message    好，我调工具检查一下现有代码
+     seq=2  tool/call            {"file":"debounce.ts"}
+     seq=3  tool/result          lint 通过，0 错误
+     seq=4  assistant/message    完成。
+   ✅ 审计：找到 tool/call，原始参数 = {"file":"debounce.ts"}
+   ✅ 修正需求：追加新事件（seq=5），旧事件原封不动
+   ✅ 不可变：篡改 seq=1 被拒（Object.isFrozen=true）
+   ✅ seq 连续：0..5 ✓
+   ✅ 断号检测：seq 断档！期望 1，实际 2——日志不可信，拒绝重放
+
+🎯 一句话：日志是真相，消息是派生——分叉在结构上不可能。
+```
+
+**看什么**：朴素版的两个崩点正好对应 harness 版的两个能力——**审计**（tool/call 参数在日志里原样可查）和**不可变**（只能追加、不能修改）。"派生"不是优化，是让"历史被篡改"在结构上不可能。
+
+### Step 02：表面投影——为什么模型看到的是"投影"，不是日志本身？
+
+**先懂几个词**：**投影 / surface** = 从日志里挑出"模型该看的事件"组成一份视图——类比：仓库货架（日志，全部）vs 橱窗陈列（surface，精选）。**只挑不复制，每次现算**。**视图 / view** = 模型实际看到的对话历史，是投影的结果。**日志专用事件** = 只进日志、不进视图的事件（如 tool/call 内部细节）。
+
+**这一步解决什么问题**：日志里有工具调用、推理、内部事件，模型不该全看。若为模型单独存一份"干净历史"副本，日志更新了副本没更新 → 两处漂移，模型看到的是过期的。
+
+**为什么这么设计**：surface 只维护"该展示哪些 seq 的列表"，`deriveMessages()` 每次从日志现算——日志是唯一事实源，视图永远可重算。投影坏了重新投影即可，不需要修数据。
+
+**收益**：视图自动跟上日志（追加新消息自动出现在视图里），不需要手动同步副本；tool/call 等内部细节天然被过滤。
+
+**流程图**：
+
+```mermaid
+flowchart LR
+    A["朴素版：手动同步副本"] --> B["日志更新了副本没更新 → 💥 漂移"]
+    C["harness 版：surface 只记 seq 列表"] --> D["deriveMessages() 每次现算"]
+    D --> E["视图永远跟得上日志"]
+```
+
+**核心代码**（`step-02-surface.ts`）：
+
+```ts
+/** 表面管理器：增量维护"能上表面的事件的 seq 列表" */
+class SurfaceManager {
+  nodes: number[] = []
+
+  /** 新事件入日志后调用：是表面事件就记下它的 seq */
+  apply(stored: StoredEvent): void {
+    if (isSurfaceEvent(stored.event)) this.nodes.push(stored.seq)
+  }
+}
+
+class Session {
+  private log: StoredEvent[] = []
+  private surface = new SurfaceManager()
+
+  append(event: SessionEvent): StoredEvent {
+    const stored: StoredEvent = { seq: this.log.length, time: Date.now(), event: deepFreeze(event) }
+    this.log.push(stored)
+    this.surface.apply(stored) // 表面同步更新——这就是"自动"
+    return stored
+  }
+
+  /** 沿表面投影模型可见历史：只有表面节点能投影 */
+  deriveMessages(): string[] {
+    return this.surface.nodes.map(seq => {
+      const ev = this.log[seq].event as SurfaceEvent
+      // user/assistant/tool 三类，tool/call 不在表面里
+    })
+  }
+}
+```
+
+**实测输出**：
+
+```text
+① 朴素版：单独维护一份"干净历史"副本，手动同步
+   日志：user/message → assistant/message → tool/call → assistant/message
+   副本：user/message → assistant/message
+   💥 崩点：日志里有 4 条，副本只有 3 条——模型看到的是过期的历史，漂移了
+
+② harness 版：surface 只记 seq 列表，视图每次现算
+   日志共 5 条，表面节点 seq = [0, 1, 3, 4]
+   tool/call 是日志专用事件 → 不上表面（模型不需要看内部调用）
+   模型看到的视图（deriveMessages 现算）：
+     user: 帮我写一个 debounce 函数
+     assistant: 我先调工具检查现有代码
+     tool: lint 通过，0 错误
+     assistant: 完成，已给实现
+
+③ 日志追加新消息 → 视图自动包含（不用手动同步副本）
+   追加后表面节点 seq = [0, 1, 3, 4, 5, 6]（自动加了 seq 5、6）
+
+🎯 一句话：投影只挑不复制、每次现算——视图永远跟得上日志，漂移不可能。
+```
+
+**看什么**：朴素版的"副本"是**第二份真相**——任何同步遗漏都是漂移。surface 不存内容只存 seq 列表，视图是"现算"的，所以**结构上就没有第二份真相**。tool/call 不上表面 = 模型不被内部细节干扰。
+
+### Step 03：压力驱动压缩——为什么"该压缩"由 token 压力决定，而不是定时触发？
+
+**先懂几个词**：**token 压力** = 当前历史折算成 token 数占模型上下文预算的比例；**压缩** = 把旧历史折叠成摘要（本步只讲"什么时候该压缩"，"怎么压缩"是 step-04）。
+
+**这一步解决什么问题**：固定 N 轮压缩 → 简单对话（聊两句就完）白白压缩浪费；复杂对话（代码+工具往返）还没到 N 轮就爆上下文。定时炸弹式压缩没有依据。
+
+**为什么这么设计**：每轮估算模型可见历史的 token 数，超过阈值（如预算 80%）才触发压缩。短对话不触发（不浪费），长对话超阈值立即触发（不迟到）。
+
+**收益**：压缩时机由真实需求驱动，而不是拍脑袋。
+
+**流程图**：
+
+```mermaid
+flowchart TB
+    A["每轮结束"] --> B["估算当前历史 tokens"]
+    B --> C{"pressure ≥ 80%?"}
+    C -->|"否"| D["✅ 继续（不浪费）"]
+    C -->|"是"| E["⚡ 立即触发压缩"]
+```
+
+**核心代码**（`step-03-pressure.ts`）：
+
+```ts
+class PressurePolicy {
+  constructor(
+    readonly contextWindow: number,
+    readonly thresholdRatio = 0.8,
+  ) {}
+
+  get thresholdTokens(): number {
+    return Math.floor(this.contextWindow * this.thresholdRatio)
+  }
+
+  /** tokenMeter.measure：测当前压力（0~1+，1 表示窗口满了） */
+  measure(history: readonly Msg[]): { tokens: number; pressure: number } {
+    const tokens = history.reduce((sum, m) => sum + estimateTokens(m.content), 0)
+    return { tokens, pressure: tokens / this.contextWindow }
+  }
+
+  isOverThreshold(m: { pressure: number }): boolean {
+    return m.pressure >= this.thresholdRatio
+  }
+}
+```
+
+**实测输出**：
+
+```text
+   上下文窗口 = 2000，阈值 = 1600 tokens（80%）
+
+① 朴素版：每 5 轮固定压缩一次
+   短对话（6 轮简单问答）：压力 = 0.156
+   💥 崩点：第 5 轮定时器到了 → 强制压缩——可压力才 0.13，白白总结花钱！
+   长对话（15 轮复杂问答）：压力实际在轮 12 就超过 0.8
+   朴素版压缩点：5、10、15 轮——轮 15 才压（晚了 3 轮，此时压力已到 1.03，窗口已爆）
+   💥 崩点：超阈值后还要干等定时器——窗口可能已经爆了
+
+② harness 版：每轮测压力，超过 80% 立即触发
+   短对话：压力 0.156 < 0.8 → ✅ 不触发（不浪费）
+   长对话：压力 0.820 ≥ 0.8 → ✅ 立即触发压缩
+
+   逐轮压力（harness 版在超阈值那一轮就触发）：
+     轮  2  tokens= 286  pressure=0.143  ████░░░░░░░░░░░░░░░░░░░░░░
+     轮 12  tokens=1639  pressure=0.820  ████████████████████████████  ⚠️ 超阈值
+     轮 15  tokens=2051  pressure=1.026  █████████████████████████████  ⚠️ 超阈值
+
+🎯 一句话：pressure ≥ 80% 才动手——短对话不浪费、长对话不迟到。
+```
+
+**看什么**：朴素版在**两个方向**都错——短对话白花钱（0.13 压力也压），长对话迟到（超阈值 3 轮后才压，窗口已爆）。压力驱动同时解决这两个问题。
+
+### Step 04：结构化 checkpoint——为什么压缩是"结构化保留"，不是"丢进垃圾桶"？
+
+**先懂几个词**：**checkpoint** = 压缩产生的"存档点"，把旧历史折叠成结构化摘要；**replace** = 用新事件（摘要）在视图里**替换**一段旧事件的操作；**sourceEventSeqs** = replace 必须声明"我替换掉了哪几条事件"——可审计性：每次压缩都有据可查。
+
+**这一步解决什么问题**：粗暴截断丢信息——问"用户最初要什么"查无此内容；直接让 LLM"随便总结一下"→ 摘要质量不可控、后续模型不知道去哪找细节；替换无记录 → 审计查无实据。
+
+**为什么这么设计**：checkpoint = 折叠旧消息 + 固定结构摘要（Primary Request / Current Work / Next Step…）+ replace 必须带 sourceEventSeqs 点名被替换的事件（端点越界/少报都拒绝）。总结必须比原文小（收敛约束）。
+
+**收益**：压缩后仍可回溯，模型"知道去哪里找"；每次替换有据可查。
+
+**流程图**：
+
+```mermaid
+flowchart LR
+    A["旧历史（表面节点 seq 0..5）"] --> B["checkpoint 结构化摘要"]
+    B --> C["replace：表面节点被替换<br/>sourceEventSeqs=[0,1,3,4,5,6]"]
+    C --> D["模型看到摘要"]
+    B --> E["审计：被替换事件从日志原样可查"]
+```
+
+**核心代码**（`step-04-checkpoint.ts`）：
+
+```ts
+/** append 时校验 replace 契约：端点必须在表面内；sourceEventSeqs 必须点名全部被影子节点 */
+if (typeof event.surfaceOp === 'object') {
+  const { start, end } = event.surfaceOp
+  if (start < 0 || end >= this.surfaceNodes.length || start > end) {
+    throw new Error(
+      `replace 端点 [${start}, ${end}] 不在当前表面（共 ${this.surfaceNodes.length} 个节点）`,
+    )
+  }
+  const shadowed = this.surfaceNodes.slice(start, end + 1)
+  if (
+    event.sourceEventSeqs.length !== shadowed.length ||
+    event.sourceEventSeqs.some((seq, i) => seq !== shadowed[i])
+  ) {
+    throw new Error(
+      `replace 必须点名全部被影子节点：期望 [${shadowed.join(', ')}]，实际 [${event.sourceEventSeqs.join(', ')}]`,
+    )
+  }
+  this.surfaceNodes.splice(start, end - start + 1, stored.seq)
+  this.generation++
+}
+```
+
+**实测输出**：
+
+```text
+① 朴素版：超预算就 slice 截断（丢进垃圾桶）
+   截断后模型看到：assistant → user → assistant
+   💥 崩点 1：问"用户最初要什么？"→ 需求已被截断，查无此内容
+   💥 崩点 2：审计"截断了什么？"→ 没有记录，查无实据
+
+② harness 版：checkpoint 结构化保留 + replace 可审计
+   原始事件（8 条，将整个影子掉）：
+     seq=0  user/message         帮我开发一个 todo CLI 工具，用 Node.js + TypeScript…
+     seq=1  assistant/message    好的，技术方案：用 fs 模块做持久化…
+     seq=2  tool/call            {"file":"src/cli.ts"}
+     …
+
+   → 总结为 3 段 checkpoint：
+     ## Primary Request and Intent：帮我开发一个 todo CLI 工具…
+     ## Current Work：很好。还差单元测试和 --json 输出的文档。
+     ## Next Step：收到，我先补单元测试覆盖增删改查…
+   ✅ 收敛约束：总结 146 tokens < 影子 152 tokens ✓
+   ✅ replace：表面 [0, 5] 被替换为 checkpoint（sourceEventSeqs=[0,1,3,4,5,6]）
+
+   ✅ 信息可检索（这就是"结构化保留"的意义）：
+     Q: 用户最初要什么？ → 帮我开发一个 todo CLI 工具，用 Node.js + TypeScript…
+     Q: 下一步做什么？   → 收到，我先补单元测试覆盖增删改查…
+
+   ✅ 契约校验：坏 replace 在源头被拒
+     端点越界被拒：replace 端点 [1, 9] 不在当前表面
+     sourceEventSeqs 少报被拒：replace 必须点名全部被影子节点
+
+🎯 一句话：总结比原文小 + 结构固定 + 替换可审计——不是丢进垃圾桶。
+```
+
+**看什么**：三个关键词对应三个能力——**结构化**（固定段位，模型知道去哪找"用户最初要什么"）、**收敛**（总结必须比原文小，不然压缩没意义）、**可审计**（sourceEventSeqs 点名，坏 replace 在源头被拒）。压缩不是"丢"，是"存档"。
+
+### Step 05：KV cache 复用——为什么压缩指令必须放在"最后一条 user 消息"？
+
+**先懂几个词**：**KV cache** = LLM 服务商按请求**开头**的 token 序列缓存计算结果，前缀相同就复用；**前缀命中** = 两次请求开头一样，第二次不用重新算。
+
+**这一步解决什么问题**：provider 按请求开头的 token 序列做 KV cache。总结指令若放中间/开头，前缀变了缓存失效，每轮全量重算——压缩省下的 token 又烧回去。
+
+**为什么这么设计**：总结指令作为**最后一条 user 消息**——历史前缀保持不变 → KV cache 复用，只付指令增量的钱。
+
+**收益**：压缩后的长对话继续省钱，不是压缩完就白烧。
+
+**流程图**：
+
+```mermaid
+flowchart TB
+    A["对话请求（已缓存）"] --> B["朴素版：指令插中间"]
+    B --> C["💥 前缀从指令处失配 → 后半段全量重算"]
+    A --> D["harness 版：指令放末尾"]
+    D --> E["✅ 前缀全部命中 → 只付指令增量"]
+```
+
+**核心代码**（`step-05-kv-cache.ts`）：
+
+```ts
+/** 模拟 provider 的 prefix KV cache：取最长公共前缀，第一个不同 token 之后全部失效 */
+class MockProvider {
+  private seen: Message[][] = []
+
+  call(request: readonly Message[]): { total: number; cached: number; billed: number } {
+    const total = request.reduce((sum, m) => sum + estimateTokens(m.content), 0)
+    let cached = 0
+    for (const prev of this.seen) {
+      let hit = 0
+      for (let i = 0; i < Math.min(prev.length, request.length); i++) {
+        if (prev[i].content !== request[i].content) break // 第一个失配点 = 缓存终点
+        hit += estimateTokens(request[i].content)
+      }
+      if (hit > cached) cached = hit
+    }
+    this.seen.push([...request])
+    return { total, cached, billed: total - cached }
+  }
+}
+```
+
+**实测输出**：
+
+```text
+   对话请求（缓存基准）：195 tokens 全量计费
+   历史 = system + 8 条消息
+
+① 朴素版：总结指令拼在历史中间
+   总结请求结构：system + 3条历史 + 💥指令 + 5条历史
+   cached=85 tokens（只命中 system + 前 3 条），billed=170
+   💥 崩点：指令插进历史中间 → 前缀从指令处失配 → 后半段全部重算
+
+② harness 版：指令作为最后一条 user 消息
+   总结请求结构：system + 8条历史 + ✅指令（末尾）
+   cached=195 tokens（前缀全部命中），billed=60（只付指令增量）
+
+对比：朴素版付费 170 vs harness 版付费 60
+   每次压缩多付 110 tokens（64.7%）——对话越长，损失越大
+
+🎯 一句话：指令放末尾 = 前缀扩展（只付增量）；放中间 = 前缀断裂（全量重算）。
+```
+
+**看什么**：同样是"总结一次"，170 vs 60 tokens——**放对位置省 64.7%**。这是纯工程细节，但对话越长、压缩次数越多，差距越大。前缀缓存是"钱"，指令放末尾是"省钱的姿势"。
+
+### Step 06：write-behind 持久化——为什么 append 不阻塞 I/O？
+
+**先懂几个词**：**write-behind** = 先写内存立即返回，后台批量落盘；**落盘** = 写进磁盘持久化。
+
+**这一步解决什么问题**：流式输出每秒产生几十个事件，每个都同步写盘 → 性能灾难（主循环卡死）；但也不能完全不落盘 → 崩溃全丢（日志是唯一事实源）。
+
+**为什么这么设计**：append 先入内存队列立即返回 → 固定窗口（200ms）批量合并写盘 → flush 静止屏障（turn 结束立即清空）→ 崩溃时从磁盘恢复。
+
+**收益**：不阻塞主循环 + 不丢事件。
+
+**流程图**：
+
+```mermaid
+flowchart LR
+    A["append（立即返回 0ms）"] --> B["内存队列"]
+    B --> C["200ms 窗口批量合并"]
+    C --> D["一次写盘 N 条"]
+    B --> E["flush 静止屏障（turn 结束）"]
+    E --> F["立即清空队列"]
+```
+
+**核心代码**（`step-06-write-behind.ts`）：
+
+```ts
+/** write-behind 核心：200ms 固定窗口 coalescing + 失败保留 + flush 静止屏障 */
+class SessionWriteBehind {
+  private queue: StoredEvent[] = []
+  private timer: ReturnType<typeof setTimeout> | null = null
+  private writing: Promise<void> | null = null
+  stats = { appended: 0, writes: 0, failedWrites: 0 }
+
+  enqueue(event: StoredEvent): void {
+    this.queue.push(event)
+    this.stats.appended++
+    if (!this.timer) {
+      this.timer = setTimeout(() => {
+        this.timer = null
+        void this.drain()
+      }, this.windowMs) // 队列空→非空时启动固定窗口
+    }
+  }
+
+  /** 静止屏障：取消等待，等活动写 + 屏障期间到达的事件 */
+  async flush(): Promise<void> {
+    if (this.timer) {
+      clearTimeout(this.timer)
+      this.timer = null
+    }
+    // …等活动写完成，再清空队列
+  }
+}
+```
+
+**实测输出**：
+
+```text
+① 朴素版 A：每次 append 都同步写磁盘（模拟 15ms fsync）
+   6 个事件写完耗时 95ms（每个都等磁盘 I/O）
+   💥 崩点：流式输出每秒几十个事件 → 每个都等 fsync → 主循环卡死
+
+② 朴素版 B：只存内存、从不写盘
+   崩溃前内存 6 条 → 崩溃后恢复 0 条
+   💥 崩点：日志是唯一事实源——内存一没，历史全没了
+
+③ harness 版：append 立即返回，200ms 窗口合并落盘
+   enqueue 6 个事件总耗时 0ms（同步返回，0 阻塞）
+   窗口截止：1 次写盘，6 个事件合并成 1 次 ✓
+
+④ flush 静止屏障：turn 结束立即清空队列
+   flush 后：2 次写盘，落盘 9 条
+
+⑤ 崩溃恢复：进程没了，磁盘还在
+   崩溃后从磁盘恢复 9 条（0 丢失 ✓）
+
+🎯 一句话：先记内存立即放行（不阻塞），窗口批量落盘（不浪费），flush 做边界（不丢失）。
+```
+
+**看什么**：朴素版 A（同步写）和朴素版 B（不写盘）是**两个极端**——一个卡死，一个丢数据。harness 版在中间：**立即返回（不卡）+ 批量落盘（不浪费）+ flush 屏障（不丢）**。三个需求一次满足。
+
+### Step 07：全链路——一场对话的"记忆一生"
+
+**先懂几个词**：回顾前六步——事件日志（唯一事实源）/ surface 投影（视图现算）/ token 压力（超阈值触发）/ checkpoint（结构化保留 + replace 审计）/ KV cache（指令放末尾）/ write-behind（批量落盘）。
+
+**这一步解决什么问题**：前六步单独看都能懂，但真实会话里它们**接力**：日志 append → surface 投影 → 压力超阈值 → checkpoint 压缩（含 KV cache 放置 + replace 审计）→ write-behind 持久化。
+
+**为什么这么设计**：四层各司其职——L1 记录真相（日志）、L2 决定看到什么（表面）、L3 决定何时折叠怎么折叠（压缩）、L4 决定何时落盘（持久化）。每层只解决一个问题，坏了一层不影响其他层。
+
+**收益**：读者从"每层单独看"升级到"看整体协作"——记忆系统的全貌。
+
+**核心代码**（`step-07-full-chain.ts`，四层接力主循环）：
+
+```ts
+// 每轮：L1 append 进日志（立即返回）→ L2 表面自动更新 → L3 测压力
+for (const round of conversation) {
+  session.append(round) // L1: 日志 + 表面 + write-behind 队列
+  const { pressure } = policy.measure(session.deriveMessages()) // L3: 测压力
+  if (policy.isOverThreshold({ pressure })) {
+    const cp = summarize(session.surfaceNodesList) // 生成 checkpoint
+    session.append(checkpointEvent(cp)) // replace + sourceEventSeqs 审计
+  }
+}
+await session.flush() // L4: turn 结束 flush 落盘
+```
+
+**实测输出**（节选，15 轮对话）：
+
+```text
+① 朴素版"记忆"：一个消息数组，超预算就截断丢开头
+   💥 截断 #1：丢 8 条（含 "第 1 轮：帮我设计一个 markd…"）
+   💥 截断 #2：丢 8 条（含 "第 5 轮：帮我设计一个 markd…"）
+   对话结束：14 条消息（852 tokens），共截断 2 次
+   💥 崩点：最初的需求 + 中间的修正全丢了，工具调用从未记录，审计查无实据
+
+② harness 版：四层接力（L1 append → L2 surface → L3 压缩 → L4 落盘）
+--- 轮 7 ---
+   ⚡ L3 压缩 #1：压力 0.862 ≥ 0.8
+     区域：表面 [0, 12]（13 节点，678 tokens）
+     KV cache：压缩付费 59 tokens，命中缓存 870
+     收敛：checkpoint 248 tokens < 影子 678
+     压缩后压力 0.432 < 0.8 ✓
+--- 轮 10 ---
+   ⚡ L3 压缩 #2：压力 0.805 ≥ 0.8
+     …
+
+📊 结尾对比：朴素版 vs harness 版各剩什么
+   朴素版：14 条原始消息（最早需求已丢）｜无工具记录｜无审计
+   harness：L1 日志 43 条全在（含工具调用）｜L2 表面 7 节点（含 3 个 checkpoint）｜L4 落盘 43 条 0 丢失
+   L3 账单：对话 2578 + 压缩 177（命中 2594）
+
+🎯 一句话：日志是真相 → 表面是视图 → 压力驱动压缩 → checkpoint 结构化保留 → write-behind 落盘。
+```
+
+**看什么**：结尾对比是最有力的证据——**朴素版 14 条消息（最早需求已丢）vs harness 版日志 43 条全在 + 3 个 checkpoint + 0 丢失**。同样的对话，一个"失忆"，一个"存档"。四层接力让记忆系统同时做到：真相不丢（L1）、视图干净（L2）、省 token（L3）、崩溃不慌（L4）。
+
+**7 步跑通的收获**：纸上读源码和亲手跑一遍是两种理解。Step 01 的断号检测、Step 02 的视图自动更新、Step 03 的压力条、Step 04 的 replace 契约校验、Step 05 的 170 vs 60 tokens、Step 06 的 0ms vs 95ms、Step 07 的结尾对比——这些真实输出把"事件溯源""投影""压力驱动""可审计压缩""前缀缓存""write-behind"从抽象概念变成了可触摸的事实。
+
 ## 设计模式总结
 
 1. **日志即真相，视图即派生**：状态和日志分叉在结构上不可能；模型看到什么由 surface 投影决定，压缩只是换投影。
