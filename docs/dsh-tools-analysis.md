@@ -280,6 +280,16 @@ type PostToolDecision =
 
 **收益**：先建立"一次调用过六道关"的地图，后面每步填实一道关。
 
+**流程图**（朴素 vs 管线，同一调用两条路）：
+
+```mermaid
+flowchart LR
+    A["模型说：调 delete_file"] --> B{"有管线吗?"}
+    B -->|"没有（朴素）"| C["直接执行<br/>参数可改 / 危险工具直接跑 / 慢工具挂死"]
+    B -->|"有（六道关）"| D["① 物化 → ② pre-execute → ③ 守卫<br/>④ 环绕 → ⑤ post-execute → ⑥ 最终化"]
+    D --> E["✅ 每道关 = 一种失败模式的拦截点"]
+```
+
 **核心代码**（`step-01-pipeline-skeleton.ts`，六段骨架 + 朴素对照）：
 
 ```ts
@@ -336,6 +346,17 @@ async function execute(exec: ToolExec): Promise<ToolResult> {
 **为什么这么设计**：物化 = 验证 → 快照 → 冻结 → 发 token。验证保证参数是无损 JSON（undefined / 函数 / 循环引用在序列化时丢信息，fail-closed 直接拒绝）；快照克隆切断与调用方的引用；冻结让任何路径的写入都抛 TypeError；token 是执行身份的凭据。
 
 **收益**：参数一进管线就"定型"，审计、重放、并行调度看到的永远是同一份。
+
+**流程图**（参数一进管线就定型）：
+
+```mermaid
+flowchart TB
+    A["调用参数（已展示给用户/审计/UI）"] --> B{"isLosslessJson 无损?"}
+    B -->|"有损：undefined/函数/循环引用"| C["拒绝（fail-closed）<br/>不带脏参数进管线"]
+    B -->|"无损"| D["structuredClone 快照<br/>切断与调用方的引用"]
+    D --> E["deepFreeze 递归冻结<br/>任何写入抛 TypeError"]
+    E --> F["执行用冻结快照<br/>外部改原对象无效"]
+```
 
 **核心代码**（`step-02-arg-freezing.ts`）：
 
@@ -413,6 +434,20 @@ function createExecution(input: {
 
 **收益**：危险工具必须过人类监督点；策略按工具声明（requiresApproval），模型无法绕过。
 
+**流程图**（三态瀑布 + fail-closed 审批）：
+
+```mermaid
+flowchart TB
+    A["pre-execute 钩子"] --> B{"三态?"}
+    B -->|"allow"| C["放行"]
+    B -->|"deny"| D["拒绝（短路，不再看后续钩子）"]
+    B -->|"ask"| E{"审批服务可用?"}
+    E -->|"无通道"| F["降级 deny<br/>绝不静默放行"]
+    E -->|"有"| G{"用户选择"}
+    G -->|"allowed-once"| C
+    G -->|"rejected / cancelled / unavailable"| D
+```
+
 **核心代码**（`step-03-approval-waterfall.ts`）：
 
 ```ts
@@ -467,6 +502,17 @@ async function resolveAsk(exec: ToolExec, reason?: string) {
 
 **收益**：守卫注册顺序无关，任何一道拒绝都是终局；策略可叠加、不会互相抵消。
 
+**流程图**（守卫只有拒绝，没有放行）：
+
+```mermaid
+flowchart LR
+    A["guardReason(exec)"] --> B["守卫 1"]
+    B -->|"拒绝理由"| C["终局拒绝<br/>后续守卫不再看"]
+    B -->|"undefined（不表态）"| D["守卫 2"]
+    D -->|"拒绝理由"| C
+    D -->|"undefined"| E["放行"]
+```
+
 **核心代码**（`step-04-monotonic-guard.ts`）：
 
 ```ts
@@ -514,6 +560,17 @@ function guardReason(exec: ToolExec): string | undefined {
 **为什么这么设计**：超时是"横切关注点"——超时 / 日志 / 重试是包在工具外面的能力，不该是工具自己的责任。execute 环绕（wrapper）把超时做成插件，工具声明 timeoutMs 预算即可，任何工具注册后自动获得超时能力，工具函数一行都不用改。
 
 **收益**：关注点分离——工具只管"做什么"，超时管"多久"，改策略不用改工具。
+
+**流程图**（超时是包在工具外面的插件）：
+
+```mermaid
+flowchart TB
+    A["工具声明 timeoutMs"] --> B["超时插件包住 next()"]
+    B --> C{"Promise.race 谁先完成?"}
+    C -->|"next() 先完成"| D["正常结果"]
+    C -->|"计时器先触发"| E["TOOL_TIMEOUT 错误<br/>调用方不挂死"]
+    F["工具函数零改动"] -.声明预算.-> B
+```
 
 **核心代码**（`step-05-timeout-wrap.ts`）：
 
@@ -567,6 +624,16 @@ function installTimeoutPolicy(): void {
 
 **收益**：结果处理（脱敏 / 校验 / 重渲染）集中一处，策略可叠加，工具保持纯粹。
 
+**流程图**（结果也要过三道门）：
+
+```mermaid
+flowchart TB
+    A["工具执行结果"] --> B{"post-execute 三态"}
+    B -->|"accept"| C["原样透传"]
+    B -->|"replace"| D["替换内容<br/>（如密钥脱敏 sk-xxx → ***）"]
+    B -->|"block"| E["整份阻止<br/>不进模型上下文"]
+```
+
 **核心代码**（`step-06-post-execute.ts`）：
 
 ```ts
@@ -614,6 +681,21 @@ for (const hook of postHooks) {
 **为什么这么设计**：六道关的顺序不是随意的——物化在前（参数定型），pre-execute 和守卫在 execute 之前（决策先于动作），环绕包住 execute（横切关注点），post-execute 在结果进模型上下文之前（输出把关），最终化收尾（通知/日志）。
 
 **收益**：一次调用 = 一个完整旅程；任何一道关都能独立短路，互不干扰。
+
+**流程图**（六道关协作 + 短路传播）：
+
+```mermaid
+flowchart LR
+    A["① 物化定型"] --> B["② 审批问人"]
+    B -->|"deny"| X["短路终止"]
+    B -->|"allow"| C["③ 守卫兜底"]
+    C -->|"拒绝"| X
+    C -->|"通过"| D["④ 环绕限时"]
+    D -->|"超时"| X
+    D -->|"正常"| E["⑤ 脱敏把关"]
+    E --> F["⑥ 最终化收尾"]
+    F --> G["结果进模型上下文"]
+```
 
 **核心代码**（`step-07-full-pipeline.ts`，主流程串联六站）：
 
