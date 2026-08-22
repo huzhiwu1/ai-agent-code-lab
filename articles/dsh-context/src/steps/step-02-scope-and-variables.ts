@@ -1,23 +1,36 @@
 /**
- * Step 02 – scope 遮蔽 + 严格变量插值：每个 agent 怎么有自己的 prompt？
+ * Step 02 – 为什么每个 agent 可以有自己的人格？为什么变量 typo 必须炸？
  *
- * 学习目标：上一步的注册表只有一层，但生产环境有 global（部署人格）和 scope
- * （每个 agent）两层——scope 层注册的同名 section/variable 遮蔽 global 层，
- * 这就是"子代理装不同人格"的机制基础。另外引入 `{{name}}` 变量插值，且是
- * 严格模式：未知变量、provider 返回 undefined、畸形引用都直接 throw——
- * `{{modle}}` 这种 typo 会在渲染时立刻炸掉，而不是静默发给模型等审阅才发现
- * （"这是作者错误，我们希望它响"）。
+ * ── 先懂三个词 ──────────────────────────────────────────────
+ * 「scope」= 每个 agent 自己的小抽屉——往抽屉里放的 section/variable 只对那个
+ *   agent 生效，还能遮蔽（shadow）全局同名项（类比：办公室每个人有自己带锁的
+ *   抽屉，抽屉里贴的便签不会影响别人桌上的便签）。
+ * 「变量」= `{{name}}` 这种占位符，装配时替换成真实值（如 `{{model}}` → 实际模型名）。
+ * 「插值」= 把占位符替换成值的动作。
  *
- * 对应源码：packages/core/system-prompt/src/index.ts:467-482（assemble 变量合并：
- *           先 global 再 scope 链，最近的 scope 同名变量胜出）
- *           index.ts:484（ScopedLayers.merge：scope 层同名 section 遮蔽 global）
- *           index.ts:258-295（interpolate 严格模式四种 throw + 孤立 {{ 字面量 +
- *           替换值不二次扫描）
+ * ── 这一步解决什么问题 ──────────────────────────────────────
+ * 新手做法 1：全局只有一个 prompt。子代理想装"前端专家"人格 → 直接改全局
+ *   字符串 → 污染了所有 agent（部署人格被永久替换）。
+ * 新手做法 2：宽松插值。`{{modle}}` 这种 typo 原样保留（或替换为空）静默发给
+ *   模型——直到审阅 transcript 才发现，错得很贵。
  *
- * 跑法：pnpm run step:02（articles/dsh-context 目录内）或根目录 pnpm run context:step:02
+ * ── 为什么这么设计 ──────────────────────────────────────────
+ * ① 注册分 global / scope 两层：scope 层同名 section/variable 遮蔽 global 层，
+ *   子代理注册同名 `deployment:persona` 就 shadow 掉全局人格——这是 per-agent
+ *   prompt 的机制基础，谁也不污染谁。
+ * ② 插值必须严格：未知变量、provider 返回 undefined、畸形引用直接 throw——
+ *   `{{modle}}` 在渲染时立刻炸掉（"这是作者错误，我们希望它响"）。
+ *
+ * ── 收益 ────────────────────────────────────────────────────
+ * per-agent prompt 成为可能（子代理装人格不再污染全局）；作者错误在渲染时响，
+ * 而不是静默污染模型直到审阅才发现。
+ *
+ * 对应源码：packages/core/system-prompt/src/index.ts（ScopedLayers 遮蔽 index.ts:484、
+ *   变量合并 index.ts:473-482、interpolate 严格模式 index.ts:258-295）
+ * 跑法：pnpm run context:step:02（或 articles/dsh-context 内 pnpm run step:02）
  */
 
-/** 一个系统提示词分区（同 Step 01；text 可以是静态文本或按装配上下文求值的 provider） */
+/** 一个系统提示词分区（text 可以是静态文本或按装配上下文求值的 provider） */
 interface PromptSection {
   readonly name: string
   readonly order: number
@@ -27,88 +40,9 @@ interface PromptSection {
 /** 变量 provider：每次装配时求值，返回 undefined 表示"注册了但本轮没有值" */
 type VariableProvider = (context: AssembleContext) => string | undefined
 
-/** 装配上下文：scope 键 + 信号（简化；真实还有 AbortSignal，见源码 AssembleContext） */
+/** 装配上下文：scope 键（真实还有 AbortSignal，见源码 AssembleContext） */
 interface AssembleContext {
   scope?: string
-}
-
-/**
- * 两层注册表：global + 若干 scope（对应源码 ScopedLayers，index.ts:347-350）。
- * 简化：scope 链只支持一层（真实是 scope 链，从远到近覆盖，原理相同）。
- */
-class SystemPromptRegistry {
-  /** global 层：部署人格、内置变量等全 agent 共享的注册 */
-  private readonly globalSections = new Map<string, PromptSection>()
-  private readonly globalVariables = new Map<string, VariableProvider>()
-  /** scope 层：每个 agent 自己的注册，遮蔽 global 同名项 */
-  private readonly scopeSections = new Map<string, Map<string, PromptSection>>()
-  private readonly scopeVariables = new Map<string, Map<string, VariableProvider>>()
-
-  /** 在 global 层注册 section（对应源码 this.section() 在全局 ctx 上调用） */
-  section(section: PromptSection): void {
-    assertNew(this.globalSections, section.name, 'prompt section')
-    this.globalSections.set(section.name, section)
-  }
-
-  /** 在某个 scope 注册 section——同名遮蔽 global（对应源码：agent 的 ctx 上调用 section()） */
-  sectionFor(scope: string, section: PromptSection): void {
-    const layer = layerFor(this.scopeSections, scope)
-    assertNew(layer, section.name, 'prompt section')
-    layer.set(section.name, section)
-  }
-
-  /** 在 global 层注册变量（对应源码 variable()，index.ts:446-455） */
-  variable(name: string, provider: VariableProvider): void {
-    if (!VARIABLE_NAME.test(name)) {
-      throw new Error(
-        `invalid prompt variable name "${name}" (must match ${String(VARIABLE_NAME)})`,
-      )
-    }
-    if (this.globalVariables.has(name))
-      throw new Error(`prompt variable "${name}" is already registered`)
-    this.globalVariables.set(name, provider)
-  }
-
-  /** 在某个 scope 注册变量——同名遮蔽 global（对应源码：agent ctx 上调用 variable()） */
-  variableFor(scope: string, name: string, provider: VariableProvider): void {
-    const layer = layerFor(this.scopeVariables, scope)
-    if (layer.has(name))
-      throw new Error(`prompt variable "${name}" is already registered in this scope`)
-    layer.set(name, provider)
-  }
-
-  /**
-   * 一次装配（对应源码 assemble()，index.ts:467-542 的前两步）：
-   * 1) 变量合并：先 global 全部求值，再 scope 覆盖——最近的 scope 同名变量胜出；
-   * 2) section 合并：scope 层遮蔽 global 同名 section，再按 order 排序。
-   */
-  assemble(context: AssembleContext = {}): PromptAssembly {
-    const scope = context.scope
-    // ① 变量合并：global 先，scope 后覆盖（index.ts:473-482）
-    const variables: Record<string, string | undefined> = {}
-    for (const [name, provider] of this.globalVariables) variables[name] = provider(context)
-    if (scope !== undefined) {
-      const layer = this.scopeVariables.get(scope)
-      if (layer !== undefined) {
-        for (const [name, provider] of layer) variables[name] = provider(context)
-      }
-    }
-    // ② section 合并：scope 遮蔽 global（index.ts:484 merge）
-    const merged = new Map(this.globalSections)
-    if (scope !== undefined) {
-      const layer = this.scopeSections.get(scope)
-      if (layer !== undefined) {
-        for (const [name, section] of layer) merged.set(name, section)
-      }
-    }
-    const sections = [...merged.values()]
-      .sort((a, b) => a.order - b.order)
-      .map(section => ({
-        name: section.name,
-        text: typeof section.text === 'function' ? section.text(context) : section.text,
-      }))
-    return { sections, variables }
-  }
 }
 
 /** 装配结果：排好序的 section + 已解析的变量表（对应源码 PromptAssembly） */
@@ -124,11 +58,85 @@ const VARIABLE_NAME = /^[a-z][a-z0-9_]*$/
 const GROUP_AT = /^\{\{([^{}]*)\}\}/
 
 /**
+ * 两层注册表：global + 若干 scope（对应源码 ScopedLayers，index.ts:347-350）。
+ * scope 层注册的同名 section/variable 遮蔽 global 层——"近层胜出"。
+ * 简化：scope 链只支持一层（真实是链，从远到近覆盖，原理相同）。
+ */
+class ScopeRegistry {
+  private readonly globalSections = new Map<string, PromptSection>()
+  private readonly globalVariables = new Map<string, VariableProvider>()
+  private readonly scopeSections = new Map<string, Map<string, PromptSection>>()
+  private readonly scopeVariables = new Map<string, Map<string, VariableProvider>>()
+
+  /** global 层注册 section（对应源码 this.section() 在全局 ctx 上调用） */
+  section(section: PromptSection): void {
+    assertNew(this.globalSections, section.name, 'prompt section')
+    this.globalSections.set(section.name, section)
+  }
+
+  /** 在某 scope 注册 section——同名遮蔽 global（对应源码：agent 的 ctx 上调用） */
+  sectionFor(scope: string, section: PromptSection): void {
+    const layer = layerFor(this.scopeSections, scope)
+    assertNew(layer, section.name, 'prompt section')
+    layer.set(section.name, section)
+  }
+
+  /** global 层注册变量（对应源码 variable()，index.ts:446-455） */
+  variable(name: string, provider: VariableProvider): void {
+    if (!VARIABLE_NAME.test(name)) {
+      throw new Error(
+        `invalid prompt variable name "${name}" (must match ${String(VARIABLE_NAME)})`,
+      )
+    }
+    assertNew(this.globalVariables, name, 'prompt variable')
+    this.globalVariables.set(name, provider)
+  }
+
+  /** 在某 scope 注册变量——同名遮蔽 global */
+  variableFor(scope: string, name: string, provider: VariableProvider): void {
+    const layer = layerFor(this.scopeVariables, scope)
+    assertNew(layer, name, 'prompt variable')
+    layer.set(name, provider)
+  }
+
+  /**
+   * 一次装配（对应源码 assemble() 前两步，index.ts:467-484）：
+   * 1) 变量合并：先 global 全部求值，再 scope 覆盖——最近的 scope 同名变量胜出；
+   * 2) section 合并：scope 层同名 section 遮蔽 global，再按 order 排序。
+   */
+  assemble(context: AssembleContext = {}): PromptAssembly {
+    const scope = context.scope
+    const variables: Record<string, string | undefined> = {}
+    for (const [name, provider] of this.globalVariables) variables[name] = provider(context)
+    if (scope !== undefined) {
+      const layer = this.scopeVariables.get(scope)
+      if (layer !== undefined) {
+        for (const [name, provider] of layer) variables[name] = provider(context)
+      }
+    }
+    const merged = new Map(this.globalSections)
+    if (scope !== undefined) {
+      const layer = this.scopeSections.get(scope)
+      if (layer !== undefined) {
+        for (const [name, section] of layer) merged.set(name, section) // 遮蔽！
+      }
+    }
+    const sections = [...merged.values()]
+      .sort((a, b) => a.order - b.order)
+      .map(section => ({
+        name: section.name,
+        text: typeof section.text === 'function' ? section.text(context) : section.text,
+      }))
+    return { sections, variables }
+  }
+}
+
+/**
  * 严格插值（对应源码 interpolate，index.ts:258-295）。逐字符扫描 `{{`：
- * - `{{` 后面有 `}}` 但中间不合法（空名、含空格、大小写不对）→ throw；
- * - 引用了未注册变量（Object.hasOwn 防原型链污染）→ throw；
- * - 变量注册了但 provider 返回 undefined → throw；
- * - `{{` 后面完全没有 `}}` → 当作字面量正文原样保留（可能是用户写的模板代码）；
+ * - 畸形引用（`{{a b}}`、`{{}}`）→ throw；
+ * - 未知变量（Object.hasOwn 防原型链污染）→ throw；
+ * - 注册了但 provider 返回 undefined → throw；
+ * - `{{` 后面完全没有 `}}` 的孤立左花括号 → 字面量正文（可能是用户写的模板代码）；
  * - 替换后的值不再二次扫描（防递归展开）。
  */
 function interpolate(
@@ -141,7 +149,7 @@ function interpolate(
   for (let open = text.indexOf('{{'); open >= 0; open = text.indexOf('{{', last)) {
     const group = GROUP_AT.exec(text.slice(open))
     if (group === null) {
-      // 后面有 `}}` 但匹配不上 → 畸形（如 `{{a b}}`）；完全没 `}}` → 字面量
+      // 后面有 `}}` 但匹配不上 → 畸形；完全没 `}}` → 字面量
       if (text.indexOf('}}', open + 2) >= 0) {
         throw new Error(
           `malformed prompt variable reference at "${text.slice(open, open + 16)}…" in "${owner}" (references are complete simple {{name}} groups)`,
@@ -151,16 +159,15 @@ function interpolate(
       last = open + 2
       continue
     }
-    const name = group[0].slice(2, -2) // 去掉 `{{` 和 `}}`
+    const name = group[0].slice(2, -2)
     if (!VARIABLE_NAME.test(name)) {
       throw new Error(
         `malformed prompt variable reference "{{${name}}}" in "${owner}" (variable names match ${String(VARIABLE_NAME)})`,
       )
     }
     if (!Object.hasOwn(variables, name)) {
-      const known = Object.keys(variables)
       throw new Error(
-        `unknown prompt variable "{{${name}}}" in "${owner}"; registered variables: ${known.length > 0 ? known.join(', ') : '(none)'}`,
+        `unknown prompt variable "{{${name}}}" in "${owner}"; registered variables: ${Object.keys(variables).join(', ') || '(none)'}`,
       )
     }
     const value = variables[name]
@@ -173,10 +180,7 @@ function interpolate(
   return result + text.slice(last)
 }
 
-/**
- * 渲染：插值 → 滤空段 → 空行拼接（对应源码 renderPrompt，index.ts:212-217，
- * 这一步开始带真实插值）。
- */
+/** 渲染：插值 → 滤空段 → 空行拼接（对应源码 renderPrompt，index.ts:212-217） */
 function renderPrompt(assembly: PromptAssembly): string {
   return assembly.sections
     .map(section => interpolate(section.text, assembly.variables, section.name))
@@ -194,7 +198,7 @@ function layerFor<T>(map: Map<string, Map<string, T>>, scope: string): Map<strin
   return layer
 }
 
-/** 重复注册防御（对应源码 NamedEntries，index.ts:315-325） */
+/** 重复注册防御（对应源码 NamedEntries） */
 function assertNew(layer: Map<string, unknown>, name: string, kind: string): void {
   if (layer.has(name)) {
     throw new Error(
@@ -204,13 +208,22 @@ function assertNew(layer: Map<string, unknown>, name: string, kind: string): voi
 }
 
 function main(): void {
-  const registry = new SystemPromptRegistry()
+  console.log('🔭 Step 02 – scope 遮蔽（每人一个抽屉）+ 严格插值（typo 必须炸）')
+  console.log('='.repeat(56))
 
-  console.log('🔭 Step 02：scope 遮蔽 + 严格变量插值')
-  console.log('-------------------------------------')
+  // ========== 朴素版 1：改全局 ==========
+  console.log('\n① 朴素版：子代理想装"前端专家"人格 → 直接改全局字符串')
+  let globalPrompt = 'You are a general-purpose coding agent.'
+  const installFrontendPersona = (): void => {
+    globalPrompt = globalPrompt.replace('general-purpose', 'senior frontend engineer') // 改全局！
+  }
+  installFrontendPersona()
+  console.log(`   改完后全局 prompt：${JSON.stringify(globalPrompt)}`)
+  console.log('   💥 崩点：所有 agent 都变成了前端专家——部署人格被永久污染，别的子代理没得选')
 
-  // ① global 层：部署人格（含 {{model}} / {{cwd}} 变量引用）+ 内置变量
-  console.log('① global 层注册：部署人格 section + {{model}}/{{cwd}} 变量')
+  // ========== harness 版 1：scope 遮蔽 ==========
+  console.log('\n② harness 版：scope 层注册同名 deployment:persona 遮蔽 global')
+  const registry = new ScopeRegistry()
   registry.section({
     name: 'harness:identity',
     order: -100,
@@ -223,33 +236,31 @@ function main(): void {
   })
   registry.variable('model', () => 'deepseek-chat')
   registry.variable('cwd', () => '/home/user/project')
-
-  // ② scope 层：agent "frontend-expert" 注册同名 persona section——遮蔽 global
-  console.log('\n② scope 层注册：agent "frontend-expert" 用同名 deployment:persona 遮蔽 global')
+  // 子代理 "frontend-expert" 注册同名 persona section → shadow 掉全局人格
   registry.sectionFor('frontend-expert', {
     name: 'deployment:persona',
     order: 0,
     text: 'You are a senior frontend engineer working in {{cwd}}. Follow the repo conventions strictly.',
   })
-  registry.variableFor('frontend-expert', 'model', () => 'deepseek-coder')
+  registry.variableFor('frontend-expert', 'model', () => 'deepseek-coder') // scope 变量也遮蔽
 
-  // ③ 装配对比：global 视角 vs scope 视角
-  console.log('\n③ assemble() 对比——同一注册表，两种 scope，两个不同的 prompt：')
   for (const scope of [undefined, 'frontend-expert'] as const) {
-    const label = scope === undefined ? 'global（部署默认）' : `scope=${scope}`
+    const label = scope === undefined ? 'global（部署默认）' : `scope=frontend-expert`
     const assembly = registry.assemble(scope === undefined ? {} : { scope })
     console.log(`   --- ${label} ---`)
-    for (const section of assembly.sections) {
-      console.log(`   [${section.name}]`)
-      console.log(`     ${section.text}`)
-    }
-    console.log(`   → 渲染（{{model}}/{{cwd}} 已插值）：`)
-    console.log(`     ${renderPrompt(assembly).replaceAll('\n', '\n     ')}`)
+    console.log(`   ${renderPrompt(assembly).replaceAll('\n', '\n   ')}`)
   }
+  console.log('   ✅ 子代理的 prompt 只在自己的抽屉里变了，global 层的部署人格原封不动')
 
-  // ④ 严格插值：{{modle}} typo → 立即 throw
-  console.log('\n④ 严格插值：未知变量 {{modle}}（typo）→ 渲染时立即 throw：')
-  const typos = new SystemPromptRegistry()
+  // ========== 朴素版 2：宽松插值 ==========
+  console.log('\n③ 朴素版：宽松插值——{{modle}} typo 原样发给模型')
+  const naiveInterpolate = (text: string): string => text.replace(/\{\{(\w+)\}\}/g, '???') // 宽松替换
+  console.log(`   渲染结果：${JSON.stringify(naiveInterpolate('Running as {{modle}}.'))}`)
+  console.log('   💥 崩点：模型收到 "Running as ???"——typo 静默通过，直到审阅 transcript 才发现')
+
+  // ========== harness 版 2：严格插值 ==========
+  console.log('\n④ harness 版：严格插值——未知变量 {{modle}} 渲染时立刻 throw')
+  const typos = new ScopeRegistry()
   typos.variable('model', () => 'deepseek-chat')
   typos.section({ name: 'persona', order: 0, text: 'Running as {{modle}}.' })
   try {
@@ -257,53 +268,43 @@ function main(): void {
     console.log('   未抛出？')
   } catch (error) {
     console.log(`   ✅ ${(error as Error).message}`)
-    console.log(
-      '   注释：宽松模式会把 {{modle}} 原样发给模型，直到审阅 transcript 才发现；严格模式让作者错误立刻响。',
-    )
+    console.log('   注释：严格模式让作者错误立刻响，而不是静默污染模型')
   }
 
-  // ⑤ provider 返回 undefined → throw（变量注册了，但本轮没有值）
-  console.log('\n⑤ provider 返回 undefined（注册了但本轮无值）→ throw：')
-  const undefinedValue = new SystemPromptRegistry()
+  console.log('\n⑤ 还有三种 throw + 一个例外：')
+  // provider 返回 undefined（注册了但本轮没有值）
+  const undefinedValue = new ScopeRegistry()
   undefinedValue.variable('token', () => undefined)
   undefinedValue.section({ name: 'persona', order: 0, text: 'Budget: {{token}}' })
   try {
     renderPrompt(undefinedValue.assemble())
     console.log('   未抛出？')
   } catch (error) {
-    console.log(`   ✅ ${(error as Error).message}`)
+    console.log(`   ✅ provider 返回 undefined → ${(error as Error).message}`)
   }
-
-  // ⑥ 畸形引用三连：{{}} / {{a b}} / 大写开头的 {{Model}}
-  console.log('\n⑥ 畸形引用：{{}}、{{a b}}、{{Model}} 全部 throw：')
-  for (const bad of ['{{}}', '{{a b}}', '{{Model}}']) {
-    const malformed = new SystemPromptRegistry()
-    malformed.variable('model', () => 'deepseek-chat')
-    malformed.section({ name: 'persona', order: 0, text: `Run: ${bad}` })
-    try {
-      renderPrompt(malformed.assemble())
-      console.log(`   ${bad} → 未抛出？`)
-    } catch (error) {
-      console.log(`   ${bad} → ✅ ${(error as Error).message}`)
-    }
+  // 畸形引用：{{a b}}（含空格）
+  const malformed = new ScopeRegistry()
+  malformed.section({ name: 'persona', order: 0, text: 'Run: {{a b}}' })
+  try {
+    renderPrompt(malformed.assemble())
+    console.log('   未抛出？')
+  } catch (error) {
+    console.log(`   ✅ 畸形引用 {{a b}} → ${(error as Error).message}`)
   }
-
-  // ⑦ 边界：孤立 {{（后面没有 }}）是字面量正文；替换值不二次扫描
-  console.log('\n⑦ 边界：孤立 {{ 是字面量；替换值不二次扫描：')
-  const edge = new SystemPromptRegistry()
-  edge.variable('model', () => 'deepseek-chat')
+  // 例外：孤立 {{（后面没有 }}）是字面量正文；替换值不二次扫描
+  const edge = new ScopeRegistry()
   edge.variable('nested', () => '{{model}}') // 值里含 {{model}}
   edge.section({
     name: 'persona',
     order: 0,
     text: 'Render {{nested}} verbatim; literal brace: {{ not closed.',
   })
-  console.log(`   → 渲染：${JSON.stringify(renderPrompt(edge.assemble()))}`)
-  console.log('   （{{model}} 没有再次展开——替换值只拼进去，不再扫描，防递归）')
+  console.log(
+    `   ✅ 孤立 {{ 是字面量、值不二次扫描：${JSON.stringify(renderPrompt(edge.assemble()))}`,
+  )
 
   console.log(
-    '\n小结：两层注册（scope 遮蔽 global）= per-agent prompt 的机制基础；严格插值把 typo/未定义/畸形引用' +
-      '全部拦截在渲染时，唯一豁免是孤立 {{ 字面量与不二次扫描。',
+    '\n🎯 一句话：scope 遮蔽让 per-agent 人格互不污染；严格插值把 typo 拦截在渲染时——抽屉是隔离的，错必须响。',
   )
 }
 
