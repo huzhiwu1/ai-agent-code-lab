@@ -10,7 +10,7 @@
   "scripts": {
     "run:dsh-loop": "tsx articles/dsh-agent-loop/src/steps/step-07-full.ts",
     "run:dsh-tools": "tsx articles/dsh-tools/src/steps/step-07-full-pipeline.ts",
-    "run:dsh-context": "tsx articles/dsh-context/src/steps/step-07-session-reference-full-assembly.ts",
+    "run:dsh-context": "tsx articles/dsh-context/src/steps/step-08-full-assembly.ts",
     "tools:step:01": "tsx articles/dsh-tools/src/steps/step-01-pipeline-skeleton.ts",
     "tools:step:02": "tsx articles/dsh-tools/src/steps/step-02-arg-freezing.ts",
     "tools:step:03": "tsx articles/dsh-tools/src/steps/step-03-approval-waterfall.ts",
@@ -25,6 +25,7 @@
     "context:step:05": "tsx articles/dsh-context/src/steps/step-05-agent-instructions.ts",
     "context:step:06": "tsx articles/dsh-context/src/steps/step-06-time-tmux-context.ts",
     "context:step:07": "tsx articles/dsh-context/src/steps/step-07-session-reference-full-assembly.ts",
+    "context:step:08": "tsx articles/dsh-context/src/steps/step-08-full-assembly.ts",
     "memory:step:01": "tsx articles/dsh-memory/src/steps/step-01-session-log.ts",
     "memory:step:02": "tsx articles/dsh-memory/src/steps/step-02-surface.ts",
     "memory:step:03": "tsx articles/dsh-memory/src/steps/step-03-pressure.ts",

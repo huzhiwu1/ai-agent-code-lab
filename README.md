@@ -55,7 +55,7 @@ DeepSeek Harness（v0.1.0-rc.5，2026-08-13 开源，MIT）是 DeepSeek 官方�
 | Step 06 | [step-06-write-behind.ts](articles/dsh-memory/src/steps/step-06-write-behind.ts) | **write-behind**：append 不阻塞 I/O，异步持久化      | `pnpm run memory:step:06` |
 | Step 07 | [step-07-full-chain.ts](articles/dsh-memory/src/steps/step-07-full-chain.ts)     | **完整链路**：日志 → 投影 → 压缩 → 持久化全流程      | `pnpm run memory:step:07` |
 
-> 📖 **精读四《上下文管理》配套复现**（`articles/dsh-context/`）：同样 7 步渐进，从 SystemPrompt 注册表一路拼到完整 pre-step 装配链：
+> 📖 **精读四《上下文管理》配套复现**（`articles/dsh-context/`）：同样 8 步渐进，从 SystemPrompt 注册表一路拼到完整 pre-step 总装：
 
 | 步骤    | 文件名                                                                                                                  | 学到什么                                                               | 跑法                       |
 | ------- | ----------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- | -------------------------- |
@@ -65,7 +65,8 @@ DeepSeek Harness（v0.1.0-rc.5，2026-08-13 开源，MIT）是 DeepSeek 官方�
 | Step 04 | [step-04-runtime-context-snapshot.ts](articles/dsh-context/src/steps/step-04-runtime-context-snapshot.ts)               | **快照投影**：变了才注入、CLEARED 作废标记、压缩后自动补发             | `pnpm run context:step:04` |
 | Step 05 | [step-05-agent-instructions.ts](articles/dsh-context/src/steps/step-05-agent-instructions.ts)                           | **AGENTS.md 动态注入**：基线 + set/replace/remove 增量 + 字节预算      | `pnpm run context:step:05` |
 | Step 06 | [step-06-time-tmux-context.ts](articles/dsh-context/src/steps/step-06-time-tmux-context.ts)                             | **时间/位置上下文**：请求时钟、伪 tmux 检测、变化驱动重注入            | `pnpm run context:step:06` |
-| Step 07 | [step-07-session-reference-full-assembly.ts](articles/dsh-context/src/steps/step-07-session-reference-full-assembly.ts) | **跨会话引用 + 全家桶**：不可信警告、tag-safe、完整 pre-step 装配链    | `pnpm run context:step:07` |
+| Step 07 | [step-07-session-reference-full-assembly.ts](articles/dsh-context/src/steps/step-07-session-reference-full-assembly.ts) | **跨会话引用**：不可信警告、tag-safe、入队前读快照                     | `pnpm run context:step:07` |
+| Step 08 | [step-08-full-assembly.ts](articles/dsh-context/src/steps/step-08-full-assembly.ts)                                     | **总装**：一次 pre-step 七层接力，朴素版全量重发 vs harness 只发变化   | `pnpm run context:step:08` |
 
 每个步骤文件顶部都有「学习目标」+「对应源码位置」，跑完一步看输出，再进下一步——这就是从 0 理解主循环的路径。
 
