@@ -167,8 +167,9 @@ function main(): void {
   console.log('\n④ 防御：两个 complete section 同时激活 → throw（谁包场必须唯一）')
   try {
     const conflict = new PromptRegistry()
-    conflict.section({ name: 'a:complete', order: 1, text: 'A', complete: true })
-    conflict.section({ name: 'b:complete', order: 2, text: 'B', complete: true })
+    // 冲突只看 complete 标志，与 order 无关（两个都 0 也一样炸）
+    conflict.section({ name: 'a:complete', order: 0, text: 'A', complete: true })
+    conflict.section({ name: 'b:complete', order: 0, text: 'B', complete: true })
     conflict.assemble()
     console.log('   未抛出？')
   } catch (error) {

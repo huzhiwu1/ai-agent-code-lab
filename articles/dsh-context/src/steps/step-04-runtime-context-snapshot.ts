@@ -23,8 +23,8 @@
  * ── 收益 ────────────────────────────────────────────────────
  * 模型永远看到最新快照，且不为不变的内容付费。
  *
- * 对应源码：packages/core/agent-loop/src/runtime-context.ts 全文（76 行，
- *   核心逻辑完整复刻；压缩交互对应 isReplacementSurfaceEvent）
+ * 对应源码：packages/core/agent-loop/src/runtime-context.ts（RuntimeContextProjection
+ *   runtime-context.ts:25-76 核心逻辑完整复刻；压缩交互对应 isReplacementSurfaceEvent）
  * 跑法：pnpm run context:step:04（或 articles/dsh-context 内 pnpm run step:04）
  */
 

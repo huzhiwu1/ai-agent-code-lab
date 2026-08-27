@@ -223,39 +223,26 @@ function main(): void {
     console.log('   ✅ 只付增量 token——"文件变了"才付费')
   }
 
-  // 新增文件 → set 增量
-  console.log('\n⑤ 新增指令文件 → set 增量')
+  // ========== ⑤ 其余增量 + 无变化（一次看完） ==========
+  console.log('\n⑤ set / remove / 无变化——其余三种情况')
   fs.write('packages/web/AGENTS.local.md', '# Local overlay\n- Use prettier before commit.\n')
   // 简化：新增文件当作新候选参与 reconcile（真实实现有候选发现，这里直接列出）
-  const withLocal = [...paths, 'packages/web/AGENTS.local.md']
-  const setUpdate = reconcile(fs, visible, withLocal)
+  const setUpdate = reconcile(fs, visible, [...paths, 'packages/web/AGENTS.local.md'])
   if (setUpdate !== undefined) {
     for (const change of setUpdate.changes) visible.set(change.path, change)
-    console.log(
-      `   → [${setUpdate.changes.map(c => c.action).join(', ')}] ${setUpdate.changes.map(c => c.path).join(', ')}`,
-    )
-    console.log('   ✅ 新文件 → set，模型知道有新的约定文件')
+    console.log(`   ✅ 新文件 → [set] ${setUpdate.changes.map(c => c.path).join(', ')}`)
   }
-
-  // 删除文件 → remove 增量
-  console.log('\n⑥ 删除指令文件 → remove 增量')
   fs.remove('./AGENTS.md')
   const removeUpdate = reconcile(fs, visible, paths)
   if (removeUpdate !== undefined) {
     for (const change of removeUpdate.changes) visible.set(change.path, change)
-    console.log(
-      `   → [${removeUpdate.changes.map(c => c.action).join(', ')}] ${removeUpdate.changes.map(c => c.path).join(', ')}`,
-    )
-    console.log(
-      `   增量消息：${JSON.stringify(removeUpdate.text.slice(removeUpdate.text.indexOf('Instructions removed'), -14))}…`,
-    )
-    console.log('   ✅ 删除也有显式增量——模型知道旧约定不再适用')
+    console.log(`   ✅ 文件删除 → [remove] ${removeUpdate.changes.map(c => c.path).join(', ')}`)
+    console.log(`   增量消息开头：${JSON.stringify(removeUpdate.text.slice(0, 60))}…`)
   }
-
-  // 没变 → 不产生任何增量
-  console.log('\n⑦ 文件没变 → reconcile 返回 undefined（什么都不发）')
   const noChange = reconcile(fs, visible, paths)
-  console.log(`   ${noChange === undefined ? '✅ 无变化，零 token 开销' : '❌ 不该有增量'}`)
+  console.log(
+    `   ✅ 文件没变 → ${noChange === undefined ? 'reconcile 返回 undefined（零 token 开销）' : '❌ 不该有增量'}`,
+  )
 
   console.log(
     '\n🎯 一句话：基线付一次全款，之后 set/replace/remove 只付差价——模型永远用最新约定，token 只花在变化上。',

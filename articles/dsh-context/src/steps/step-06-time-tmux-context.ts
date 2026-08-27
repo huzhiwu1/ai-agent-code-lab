@@ -1,5 +1,5 @@
 /**
- * Step 06 – 为什么"实时情报"是插件 + 快照，而不是写死在引擎里？（重点是伪 tmux 检测）
+ * Step 06 – 为什么"实时情报"是插件 + 快照，而不是写死在引擎里？（主点：伪 tmux 检测）
  *
  * ── 先懂两个词 ──────────────────────────────────────────────
  * 「插件」= 挂在 pre-step 上的可选模块，谁拥有事实谁注册（类比：餐厅的"时令
@@ -9,18 +9,15 @@
  *   祖先进程继承了 `$TMUX_PANE`，变量存在 ≠ 你真在 tmux 里。
  *
  * ── 这一步解决什么问题 ──────────────────────────────────────
- * 新手做法 1：在引擎里写死"注入当前时间" → 引擎要为所有场景负责，装载/卸载
- *   一个情报源都要改引擎。
- * 新手做法 2：看到 `$TMUX_PANE` 就以为是 tmux → 在 VS Code 里误报"你在 tmux
- *   pane 0"，模型被误导。
+ * 新手做法：看到 `$TMUX_PANE` 就以为是 tmux → 在 VS Code 里误报"你在 tmux
+ *   pane 0"，模型被环境信息误导。
  *
  * ── 为什么这么设计 ──────────────────────────────────────────
- * ① 情报 = 插件：time-context 注入绝对时间 + 相对耗时，refreshIntervalMs 限频
- *   防刷屏；tmux-context 注入 session/window/pane/layout——谁拥有事实谁注册，
- *   引擎保持干净。
- * ② 伪 tmux 检测：`ps -o tty=`（本进程控制终端）必须等于 `#{pane_tty}`（该
- *   pane 的终端）才算真在 tmux——继承环境变量的终端在这里现形。所有失败都是
- *   no-op + warning，绝不阻塞 turn。
+ * 伪 tmux 检测（本步主点）：`ps -o tty=`（本进程控制终端）必须等于 `#{pane_tty}`
+ *   （该 pane 的终端）才算真在 tmux——环境变量可以被继承，但 tty 不能。所有
+ *   失败都是 no-op + warning，绝不阻塞 turn。
+ *   配套演示：情报 = 插件 + 快照（time-context 绝对时间 + 相对耗时 + 限频；
+ *   tmux 位置变了才重注入）——谁拥有事实谁注册，引擎保持干净。
  *
  * ── 收益 ────────────────────────────────────────────────────
  * 上下文生产者可插拔；伪环境被识别，模型不被误导；上下文缺失不影响主流程。
@@ -44,21 +41,11 @@ class Session {
   lastModelVisibleTime: number | undefined
 }
 
-/** 紧凑时长格式（对应源码 formatDuration，time-context/index.ts:41-55） */
+/** 紧凑时长格式（对应源码 formatDuration，time-context/index.ts:41-55，这里只保留 m/s 两级） */
 function formatDuration(elapsedMs: number): string {
-  let seconds = Math.floor(Math.max(0, elapsedMs) / 1000)
-  const days = Math.floor(seconds / 86_400)
-  seconds %= 86_400
-  const hours = Math.floor(seconds / 3600)
-  seconds %= 3600
+  const seconds = Math.floor(Math.max(0, elapsedMs) / 1000)
   const minutes = Math.floor(seconds / 60)
-  seconds %= 60
-  const parts: string[] = []
-  if (days > 0) parts.push(`${days}d`)
-  if (hours > 0) parts.push(`${hours}h`)
-  if (minutes > 0) parts.push(`${minutes}m`)
-  parts.push(`${seconds}s`)
-  return parts.join(' ')
+  return `${minutes > 0 ? `${minutes}m ` : ''}${seconds % 60}s`
 }
 
 /** 时间快照的模型-facing 文本（对应源码 renderText，time-context/index.ts:110-125） */
@@ -201,36 +188,30 @@ function main(): void {
   console.log('⏱️  Step 06 – 实时情报 = 插件 + 快照；伪 tmux 一眼识破')
   console.log('='.repeat(56))
 
-  // ========== 朴素版 1：引擎写死时间 ==========
-  console.log('\n① 朴素版：引擎写死"注入当前时间"')
-  console.log('   引擎代码：每轮请求硬编码 `Time: ${Date.now()}`')
-  console.log(
-    '   💥 崩点：引擎要为所有场景负责——部署方想关掉时间情报得改引擎；想加天气情报也得改引擎',
-  )
-
-  // ========== harness 版 1：time-context 插件 ==========
-  console.log('\n② harness 版：time-context 插件（绝对时间 + 相对耗时 + 限频）')
+  // ========== 配套演示：time-context 插件（绝对时间 + 相对耗时 + 限频） ==========
+  console.log('\n① 配套演示：time-context 插件——情报做成插件，引擎不写死')
+  console.log('   朴素版（不演示了）：引擎写死"注入当前时间" → 部署方想关/加情报都得改引擎')
   const session = new Session()
   const baseTime = Date.now()
   session.lastModelVisibleTime = baseTime - 272_000 // 上一条模型可见消息在 4m32s 前
   const first = injectTimeContext(session, 1, 1, undefined, baseTime)
-  console.log(`   turn 1 / step 1 注入：${first!.text}`)
+  console.log(`   turn 1 / step 1 注入：${first!.text.replace('\n', ' | ')}`)
   const skipped = injectTimeContext(session, 2, 1, 10_000, baseTime + 2_000)
   console.log(
-    `   turn 2 / step 1（距上次仅 2s，refreshIntervalMs=10000）→ ${skipped === undefined ? '✅ 跳过（限频防刷屏）' : '❌ 不该注入'}`,
+    `   turn 2 / step 1（距上次 2s，refreshIntervalMs=10000）→ ${skipped === undefined ? '✅ 跳过（限频防刷屏）' : '❌ 不该注入'}`,
   )
   const second = injectTimeContext(session, 2, 1, 10_000, baseTime + 15_000)
   console.log(
     `   turn 2 / step 1（15s 后）→ ${second === undefined ? '❌ 应该注入' : `✅ 注入：${second.text.split('\n')[1]}`}`,
   )
 
-  // ========== 朴素版 2：$TMUX_PANE 存在 = tmux ==========
-  console.log('\n③ 朴素版：看到 $TMUX_PANE 就注入"你在 tmux pane 0"')
+  // ========== 朴素版：$TMUX_PANE 存在 = tmux ==========
+  console.log('\n② 朴素版：看到 $TMUX_PANE 就注入"你在 tmux pane 0"')
   console.log('   VS Code 集成终端从 tmux 祖先进程继承了 $TMUX/$TMUX_PANE')
   console.log('   💥 崩点：误报"你在 tmux pane 0"——模型以为自己在终端里，被环境信息误导')
 
-  // ========== harness 版 2：tmux-context 插件（TTY 校验） ==========
-  console.log('\n④ harness 版：tmux-context——tty 匹配才算真在 tmux')
+  // ========== harness 版：tmux-context 插件（TTY 校验） ==========
+  console.log('\n③ harness 版：tmux-context——tty 匹配才算真在 tmux')
   console.log('   命令序列：$TMUX_PANE 存在 → ps -o tty= 拿本进程控制终端 → 与 #{pane_tty} 比对')
   const noTmux = simulatedBash({ tmuxPane: undefined, selfTty: 'ttys001', paneTty: '/dev/ttys001' })
   console.log(
@@ -238,7 +219,7 @@ function main(): void {
   )
   const fakeTmux = simulatedBash({ tmuxPane: '%1', selfTty: 'ttys002', paneTty: '/dev/ttys001' })
   console.log(
-    `   场景 B（重点）：伪 tmux——变量被继承但 tty 不匹配（ttys002 ≠ ttys001）→ ${queryTmuxLocation(fakeTmux, process.pid) === undefined ? '✅ 判定伪 tmux，什么都不注入' : '❌'}`,
+    `   场景 B（主点）：伪 tmux——变量被继承但 tty 不匹配（ttys002 ≠ ttys001）→ ${queryTmuxLocation(fakeTmux, process.pid) === undefined ? '✅ 判定伪 tmux，什么都不注入' : '❌'}`,
   )
   const realTmux = simulatedBash({
     tmuxPane: '%1',
@@ -267,9 +248,8 @@ function main(): void {
       ],
     })
     const movedLocation = queryTmuxLocation(moved, process.pid)
-    const movedState = movedLocation === undefined ? '' : renderState(movedLocation)
     console.log(
-      `   变化驱动重注入：位置没变 → 不注入；pane %0→${movedLocation?.paneId} → ${state === movedState ? '❌ 漏注入' : '✅ 重新注入'}`,
+      `   变化驱动重注入：pane %0→${movedLocation?.paneId}，稳定块变了 → ${movedLocation !== undefined && renderState(movedLocation) !== state ? '✅ 重新注入' : '❌ 漏注入'}`,
     )
   }
   console.log('   注释：所有失败（shell 拒绝/解析失败）都是 no-op + warning，绝不阻塞 turn')
