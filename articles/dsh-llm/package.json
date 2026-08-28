@@ -1,0 +1,21 @@
+{
+  "name": "@articles/dsh-llm",
+  "version": "1.0.0",
+  "private": true,
+  "description": "简化版 LLM 层 – 复现 DeepSeek Harness LLM 层核心机制（统一流式协议/块组装/不可变消息/适配器注册表/调用配置/错误归一化/重试策略/token 估算，8 步渐进），纯 Node 无依赖",
+  "main": "src/steps/step-08-token-meter.ts",
+  "scripts": {
+    "run:dsh-llm": "tsx src/steps/step-08-token-meter.ts",
+    "step:01": "tsx src/steps/step-01-unified-stream-protocol.ts",
+    "step:02": "tsx src/steps/step-02-block-assembler.ts",
+    "step:03": "tsx src/steps/step-03-immutable-message.ts",
+    "step:04": "tsx src/steps/step-04-adapter-registry.ts",
+    "step:05": "tsx src/steps/step-05-call-config-resolution.ts",
+    "step:06": "tsx src/steps/step-06-failure-normalization.ts",
+    "step:07": "tsx src/steps/step-07-retry-policy.ts",
+    "step:08": "tsx src/steps/step-08-token-meter.ts"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.0"
+  }
+}

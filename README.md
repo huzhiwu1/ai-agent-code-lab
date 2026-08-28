@@ -8,12 +8,13 @@ DeepSeek Harness（v0.1.0-rc.5，2026-08-13 开源，MIT）是 DeepSeek 官方�
 
 ## 📖 文章列表
 
-| 篇目                 | 内容                                                                      | 飞书完整版（含渲染图）                                            | 本地 Markdown                                                      |
-| -------------------- | ------------------------------------------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------------------ |
-| 第一篇：Agent 主循环 | turn/step 双层循环、消息注入、max-tokens 粘性、工具并发调度、Phase 状态机 | [飞书文档](https://my.feishu.cn/docx/BmMsdkoDCoId9rxFSaAcOUEhngb) | [docs/dsh-agent-loop-analysis.md](docs/dsh-agent-loop-analysis.md) |
-| 第二篇：工具调用管线 | 六段执行管线、参数物化、单调守卫、取消体系、并行/独占调度                 | [飞书文档](https://my.feishu.cn/docx/BCryd1dmDouDjbxHbdLcLAWUnUd) | [docs/dsh-tools-analysis.md](docs/dsh-tools-analysis.md)           |
-| 第三篇：记忆管理     | 事件日志、surface 投影、压力检测、checkpoint 压缩、KV cache 复用          | [飞书文档](https://my.feishu.cn/docx/TfeGdEouco5KmMxeT7ocmEctnyd) | [docs/dsh-memory-analysis.md](docs/dsh-memory-analysis.md)         |
-| 第四篇：上下文管理   | SystemPrompt 注册表、快照投影（变了才说）、四类上下文插件、装配纪律       | [飞书文档](https://my.feishu.cn/docx/MVeZd2Ttso3qmqxUPq7c9RQDnzc) | [docs/dsh-context-analysis.md](docs/dsh-context-analysis.md)       |
+| 篇目                 | 内容                                                                                                                                     | 飞书完整版（含渲染图）                                            | 本地 Markdown                                                      |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------------------ |
+| 第一篇：Agent 主循环 | turn/step 双层循环、消息注入、max-tokens 粘性、工具并发调度、Phase 状态机                                                                | [飞书文档](https://my.feishu.cn/docx/BmMsdkoDCoId9rxFSaAcOUEhngb) | [docs/dsh-agent-loop-analysis.md](docs/dsh-agent-loop-analysis.md) |
+| 第二篇：工具调用管线 | 六段执行管线、参数物化、单调守卫、取消体系、并行/独占调度                                                                                | [飞书文档](https://my.feishu.cn/docx/BCryd1dmDouDjbxHbdLcLAWUnUd) | [docs/dsh-tools-analysis.md](docs/dsh-tools-analysis.md)           |
+| 第三篇：记忆管理     | 事件日志、surface 投影、压力检测、checkpoint 压缩、KV cache 复用                                                                         | [飞书文档](https://my.feishu.cn/docx/TfeGdEouco5KmMxeT7ocmEctnyd) | [docs/dsh-memory-analysis.md](docs/dsh-memory-analysis.md)         |
+| 第四篇：上下文管理   | SystemPrompt 注册表、快照投影（变了才说）、四类上下文插件、装配纪律                                                                      | [飞书文档](https://my.feishu.cn/docx/MVeZd2Ttso3qmqxUPq7c9RQDnzc) | [docs/dsh-context-analysis.md](docs/dsh-context-analysis.md)       |
+| 第五篇：LLM 层       | 统一流式 chunk 词汇表、BlockAssembler 容错组装、不可变消息溯源、适配器注册表与 waterfall、调用配置解析、错误归一化、重试策略、token 估算 | TODO                                                              | [docs/dsh-llm-analysis.md](docs/dsh-llm-analysis.md)               |
 
 > 飞书版含完整渲染的主循环全景图（mermaid），建议优先阅读。
 
@@ -67,6 +68,19 @@ DeepSeek Harness（v0.1.0-rc.5，2026-08-13 开源，MIT）是 DeepSeek 官方�
 | Step 06 | [step-06-time-tmux-context.ts](articles/dsh-context/src/steps/step-06-time-tmux-context.ts)                             | **时间/位置上下文**：请求时钟、伪 tmux 检测、变化驱动重注入            | `pnpm run context:step:06` |
 | Step 07 | [step-07-session-reference-full-assembly.ts](articles/dsh-context/src/steps/step-07-session-reference-full-assembly.ts) | **跨会话引用**：不可信警告、tag-safe、入队前读快照                     | `pnpm run context:step:07` |
 | Step 08 | [step-08-full-assembly.ts](articles/dsh-context/src/steps/step-08-full-assembly.ts)                                     | **总装**：一次 pre-step 七层接力，朴素版全量重发 vs harness 只发变化   | `pnpm run context:step:08` |
+
+> 📖 **精读五《LLM 层》配套复现**（`articles/dsh-llm/`）：8 步渐进，从统一流式协议一路拼到 token 估算：
+
+| 步骤    | 文件名                                                                                              | 学到什么                                                              | 跑法                   |
+| ------- | --------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- | ---------------------- |
+| Step 01 | [step-01-unified-stream-protocol.ts](articles/dsh-llm/src/steps/step-01-unified-stream-protocol.ts) | **统一 chunk 词汇表**：七种 chunk，供应商协议在 adapter 边界翻译      | `pnpm run llm:step:01` |
+| Step 02 | [step-02-block-assembler.ts](articles/dsh-llm/src/steps/step-02-block-assembler.ts)                 | **块组装**：增量拼接 + delta-only 容错 + max-tokens 过滤 tool-call    | `pnpm run llm:step:02` |
+| Step 03 | [step-03-immutable-message.ts](articles/dsh-llm/src/steps/step-03-immutable-message.ts)             | **不可变消息**：出生即冻结 + MessageSource/ContextForm 溯源           | `pnpm run llm:step:03` |
+| Step 04 | [step-04-adapter-registry.ts](articles/dsh-llm/src/steps/step-04-adapter-registry.ts)               | **适配器注册表**：all-or-nothing 注册 + 原子 replace + waterfall 短路 | `pnpm run llm:step:04` |
+| Step 05 | [step-05-call-config-resolution.ts](articles/dsh-llm/src/steps/step-05-call-config-resolution.ts)   | **调用配置解析**：能力预检 + 默认值物化 + prepared call 单次派发      | `pnpm run llm:step:05` |
+| Step 06 | [step-06-failure-normalization.ts](articles/dsh-llm/src/steps/step-06-failure-normalization.ts)     | **错误归一化**：任意 throw → 结构化 failure → 终态 finish chunk       | `pnpm run llm:step:06` |
+| Step 07 | [step-07-retry-policy.ts](articles/dsh-llm/src/steps/step-07-retry-policy.ts)                       | **重试策略**：normal/always 两模式 + 指数退避 jitter + 事件日志计数   | `pnpm run llm:step:07` |
+| Step 08 | [step-08-token-meter.ts](articles/dsh-llm/src/steps/step-08-token-meter.ts)                         | **token 估算**：固定密度启发式 + 嵌套 tool-result 递归估算            | `pnpm run llm:step:08` |
 
 每个步骤文件顶部都有「学习目标」+「对应源码位置」，跑完一步看输出，再进下一步——这就是从 0 理解主循环的路径。
 

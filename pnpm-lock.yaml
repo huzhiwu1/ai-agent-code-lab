@@ -56,6 +56,12 @@ importers:
 
   articles/dsh-context: {}
 
+  articles/dsh-llm:
+    devDependencies:
+      tsx:
+        specifier: ^4.20.0
+        version: 4.23.12
+
   articles/dsh-memory:
     devDependencies:
       tsx:
