@@ -18,9 +18,10 @@
 
 已完成的 package.json 模式：
 
-- `articles/dsh-memory/package.json`（@articles/dsh-memory，纯 Node 无外部依赖，tsx 跑，每步一个 script）
+- `articles/dsh-agent-loop/package.json`（**真实 LLM 版**：@langchain/openai + dotenv，读根 .env 的 LLM_*，tsx 跑，每步一个 script）
+- `articles/dsh-memory/package.json`（纯机制演示版，无 LLM）
 
-**⚠️ 本系列复现全部为纯自实现 TS，不需要真实 dsh 依赖、不需要 LLM API key**——机制（注册表/seed/深度/权限/事件/续对话）全部自己用最小代码实现，模型调用用"模拟 agent"（收到 prompt 立即产生确定性回复）代替。参考 `articles/dsh-memory` 的做法。
+**⚠️ 本系列复现机制部分（注册表/seed/深度/权限/事件/续对话）自己用最小 TS 实现、不依赖真实 dsh 包；但 child 的"干活/对话"必须走真实 LLM**——对齐 `articles/dsh-agent-loop` 的用法：ChatOpenAI 读仓库根 `.env`（LLM_API_KEY / LLM_BASE_URL / LLM_MODEL，支持 DeepSeek 或任意 OpenAI 兼容端点，`.env` 已存在），不要用"模拟回复"糊弄。机制是教学重点，模型产出是真实运行结果。
 
 ## 任务
 
@@ -55,7 +56,7 @@
   - `SubagentRuntime`（简化）：`registerProvider()` / `getProvider()` / `list()` / `start(name, request)`
   - `SubagentRun` = `{ id, result: Promise<SubagentResult>, dispose() }`；**发布边界**：发布前失败 → start() reject 并清理；发布后失败 → 通过 run.result 结算（stopReason 词汇：completed/aborted/error/max-tokens/refusal）
   - 重复注册同名 provider → DUPLICATE_PROVIDER 报错；不存在的名字 → NO_PROVIDER
-- 演示：注册两个 mock provider（`spawn` 和 `acp`——acp 假装走"外部进程"），各自 start 一个模拟委托，打印 run 的 id/结果/stopReason；注册重名报错；start 不存在的 provider 报错
+- 演示：注册两个 provider（`spawn` 真实进程内 child；`acp` 简化为"外部进程"桩——进程边界非本步重点），各自 start 一个委托，child 用真实 LLM 完成任务，打印 run 的 id/真实结果/stopReason；注册重名报错；start 不存在的 provider 报错
 - 对应源码：`subagent/src/types.ts`（SubagentProvider/SubagentRun）+ `subagent/src/index.ts`（registerProvider/expectProvider）
 - 必须写：provider 接口 + 注册表 + start 原语 + 发布边界语义（用注释 + 输出讲清"为什么 start reject 和 result 结算要分开"）
 - 可省略：continuable 全部、capabilities 校验细节（Step 03 才讲）、事件（Step 06 才讲）
@@ -69,7 +70,7 @@
   - fork = seed child：把父 Session 的**已完成 turn 前缀**作为 seed 复制给 child（child 继承父对话上下文）
   - `completedTurnPrefix()`：seed 截到**最后一个 `turn/end`**——in-flight turn 排除（它的 subagent 调用还没结果，不能作为合法回放历史）
   - 父日志只记录 `tool/call` + `tool/result`（子代理最终输出），child 内部 step 不进父日志
-- 演示：模拟父会话日志（几轮对话 + 一个正在进行的 turn），fork 一个 child 打印它继承的历史；spawn 一个 child 打印它是空的；演示 in-flight turn 不出现在 seed 里（注释解释为什么）
+- 演示：模拟父会话日志（几轮对话 + 一个正在进行的 turn），fork 一个 child 打印它继承的历史，并让 fork child 基于继承的上下文用真实 LLM 回答追问（答得出父对话内容）；spawn 一个 child 打印它是空的（同一追问它答不出继承内容）；演示 in-flight turn 不出现在 seed 里（注释解释为什么）
 - 对应源码：`subagent-fork-in-process/src/index.ts`（completedTurnPrefix）+ `subagent-spawn-in-process/src/index.ts`
 - 必须写：completedTurnPrefix 的"截到最后一个 turn/end"逻辑、spawn/fork 对比输出
 - 可省略：真实 Session 事件系统（用简化日志数组即可）、persistence
@@ -109,7 +110,7 @@
   - 委托边界是权限快照点：`captureDelegatedPolicyOverrides(parent)` 同步捕获父 session 的显式 sandbox override；`approvalPolicy` **钉死 'never'**（不读父的 approval 策略——后台 child 的审批升级是"没人看的阻塞"，与其造可见性机制不如让状态不可能出现）
   - 快照写成 child 自己 log 上的持久事件（`sandbox/mode` + `approval/policy`，source: 'delegation'）——cold resume 回放它，fork seed 的陈旧父策略输给它
   - **每个 child 被告知而非被坑**：child 的 system prompt 里有一条 delegation 声明（权限已固定、要审批的操作自动拒绝、需要更宽权限就报限制让父处理、别重试）
-- 演示：模拟一个 child 尝试"需要审批的越权操作"（如改 sandbox 模式）→ 被确定性拒绝（policy='never'），打印拒绝原因 + child log 里的 delegation 事件；对比：如果没有钉死（继承父 'ask'）会发生什么（无人看的 pending）——注释解释
+- 演示：派一个 child 用真实 LLM 执行权限内任务（成功）；child 再尝试"需要审批的越权操作"（如改 sandbox 模式）→ 被确定性拒绝（policy='never'），打印拒绝原因 + child log 里的 delegation 事件；对比：如果没有钉死（继承父 'ask'）会发生什么（无人看的 pending）——注释解释
 - 对应源码：`subagent/src/child-agent.ts`（captureDelegatedPolicyOverrides / appendDelegatedPolicyOverrides / SUBAGENT_DELEGATION_CONTEXT）
 - 必须写：capture 钉死 never + append delegation 事件 + 越权拒绝演示 + delegation 声明文案
 - 可省略：真实 ApprovalService（用一个 decide() 函数模拟即可）、sandbox 完整实现
@@ -122,7 +123,7 @@
   - `observeRun()`：start 时发 `subagent/start`（runId + provider + child id），result 结算时发配对的 `subagent/end`（同 runId + stopReason + lastAssistantMessage）——**同一 runId 配对**，观察者看到统一词汇
   - provider 注册表广播 `provider-added` / `provider-removed`；消费方（工具）**镜像 provider 生命周期**而不是赌加载顺序：provider 在就注册工具、走就注销（异步状态不是同步状态——跨 fiber 依赖用事件，消除 load-order 需求）
   - listener 隔离：一个 listener throw 不饿死其他 listener（try/catch 包裹）
-- 演示：实现一个极简事件总线（on/emit）；订阅 start/end；跑一次委托打印配对事件；注册/移除 provider 打印 added/removed；一个故意 throw 的 listener 不影响其他 listener 收到事件
+- 演示：实现一个极简事件总线（on/emit）；订阅 start/end；用真实 LLM 跑一次委托打印配对事件（start 带 runId，end 带同 runId + stopReason + 真实输出）；注册/移除 provider 打印 added/removed；一个故意 throw 的 listener 不影响其他 listener 收到事件
 - 对应源码：`subagent/src/lifecycle.ts`（observeRun / createLifecycleEmitter）+ `subagent/src/index.ts`（registerProvider 里的 ctx.effect）
 - 必须写：start/end 配对（runId 关联）、provider-added/removed、listener 隔离
 - 可省略：scoped dispatch（按父 agent 过滤）、continuable Activation observer（可提一句）
@@ -137,7 +138,7 @@
   - `startContinuable(spec)` → 保留 childId → 创建/恢复 Agent → `followup(initialPrompt)` → inbox 接受返回 `{ childId, messageId }`（不等 turn 开始）
   - `followup(parent, childId, content)`：live Activation 在 → 直接入 inbox（running 排队 / waiting 唤醒）；不在 → **cold resume**（从持久 Session 重建 Activation）
   - 冷恢复授权：只有 durable child 的 **exact live direct parent** 能继续它
-- 演示：简化实现 Activation 表（Map<childId, {handle, inbox}>）+ cold resume（模拟"进程重启"：清空 Activation 表但保留 Session 存储 → followup 自动重建）；先 startContinuable 派一个 child → followup 追加一轮对话 → 模拟重启 → 再 followup → 打印每轮输出，证明同一 Session 持续
+- 演示：简化实现 Activation 表（Map<childId, {handle, inbox}>）+ cold resume（模拟"进程重启"：清空 Activation 表但保留 Session 存储 → followup 自动重建）；先 startContinuable 派一个 child（真实 LLM 答首轮）→ followup 追加一轮对话（真实 LLM 记得上文、上下文连续）→ 模拟重启 → 再 followup → 打印每轮输出，证明同一 Session 持续
 - 对应源码：`subagent/src/continuation.ts`（startContinuable L403 / followup L476 / coldResume L883 / materialize L966）
 - 必须写：Session/Activation 两层结构、followup 三分支（running/waiting/absent→cold resume）、exact live parent 授权
 - 可省略：interrupt / report / drain / ownedChildren 全图（Step 08 讲 report）、真实持久化（内存 Map 模拟重启清 Activation 即可）
@@ -151,7 +152,7 @@
   - `reportFrom(child, content)`：exact live child 是发送凭证，service 从持久 `parentSession` 推导唯一接收者（不接受调用方选 recipient/ancestor）——**嵌套汇报只跨一条边**（grandchild → 它的 direct child parent）
   - report 是协作控制不是结果包装：成功不结束 turn、不结算 Activation、结束 turn 也从不自动 report；child 被指导"结束前调一次 report，自包含结果"
   - quiet vs wakeup 投递（可简化：都做成"父收到一条消息"）
-- 演示：**总装 demo**——主 agent 并行派 2 个子代理（fork 一个带上下文的、spawn 一个独立调研的），每个 child 干活后用 report 把自包含结果送回父，父汇总打印；再演示"越级汇报被拒"（grandchild 想直接 report 给 root → 只能给它 direct parent）
+- 演示：**总装 demo**——主 agent 并行派 2 个子代理（fork 一个带上下文的、spawn 一个独立调研的），每个 child 用真实 LLM 干活后用 report 把自包含结果送回父，父汇总打印（输出含 child 真实回答）；再演示"越级汇报被拒"（grandchild 想直接 report 给 root → 只能给它 direct parent）
 - 对应源码：`tool-subagent-report/src/index.ts`（installReportTool）+ `subagent/src/continuation.ts`（reportFrom L583 / authorizeReporter L596）
 - 必须写：report 单边投递语义（child→direct parent）、scope-local 安装（注释 + 演示）、越级汇报拒绝、双 child 并行汇总总装
 - 可省略：settlement notice（manager 自动结算投递）细节、interrupt、后台 Task 集成（注释提一句即可）
@@ -162,12 +163,12 @@
 2. **顶部注释四段式**：── 先懂几个词 / 这一步解决什么问题（痛苦场景）/ 为什么这么设计（哲学思想）/ 收益，结尾注明对应源码文件:行号 + 跑法
 3. **代码注释即教学**：关键行为旁边用注释讲"为什么"（不这么做会怎样），像 dsh-memory step-01 那样
 4. **忠实源码机制**：命名和机制对齐真实源码（SubagentRun/SubagentResult/stopReason/capabilities/delegationDepth/completedTurnPrefix/Activation/reportFrom），不发明源码没有的行为；拿不准的看必读材料里的源码文件
-5. **纯自实现零依赖**：只用 Node 内置 + tsx；不需要真实 dsh 包、不需要 LLM API key（模拟 agent 回复用确定性文本，如 `[模拟 child ${id}] 收到任务：...，已完成`）
+5. **机制自实现 + 真实 LLM**：机制部分（注册表/seed/深度/权限/事件/Activation）不依赖真实 dsh 包、自实现最小代码；**child 的任务执行与对话必须走真实 LLM**——ChatOpenAI 读仓库根 .env 的 LLM_*，用法对齐 `articles/dsh-agent-loop/src/steps/step-01-minimal.ts`；禁止用"[模拟 child] 收到任务…"这类确定性假回复替代，子代理产出必须是真实运行结果
 6. **输出教学性**：console.log 用清晰分隔（参考 dsh-memory 的 ── 分隔和 ✅/❌/🔍 标记），让初学者一眼看到"这步证明了什么"
 7. 完成后自检：每步单独 `tsx src/steps/step-0X.ts` 跑一遍确认无报错；`package.json` 补好 scripts；根目录 `package.json` 的 `run:dsh-subagent` 总入口指向 step-08
 
 ## 交付物
 
-- `articles/dsh-subagent/package.json`（@articles/dsh-subagent，scripts: step:01~08 + start）
+- `articles/dsh-subagent/package.json`（@articles/dsh-subagent，依赖 @langchain/openai + @langchain/core + dotenv，scripts: step:01~08 + start）
 - `articles/dsh-subagent/src/steps/step-01-provider-registry.ts` ~ `step-08-report-and-assembly.ts`
 - 自检报告：每个 step 的实际运行输出贴到任务回复末尾
