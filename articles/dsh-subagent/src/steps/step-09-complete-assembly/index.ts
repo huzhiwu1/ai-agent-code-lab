@@ -38,8 +38,9 @@ async function main(): Promise<void> {
   runtime.registerCapability('spawn-agent', 0, { persona: true })
   console.log('   fork-agent.capabilities.persona = true')
 
-  // ── ③ 并行派 2 child（step-02）：fork 继承上下文 vs spawn 独立调研 ──
+  // ── ③ 并行派 2 child（step-02）：fork 继承上下文作 seed，spawn 独立调研 ──
   console.log('\n③ 并行派 2 child（step-02）：fork 继承上下文 vs spawn 独立调研')
+  console.log('   fork seed = 父上下文（简化版 completedTurnPrefix，完整版截到最后一个 turn/end）')
   const parentContext = '父 agent 正在写 DeepSeek Harness 子代理编排章节的周报。'
   const [forkId, spawnId] = await Promise.all([
     runtime.start(
@@ -77,6 +78,15 @@ async function main(): Promise<void> {
     console.log(`   ✅ 拒绝：${(error as Error).message}（委托前拒绝，child 从未创建）`)
   }
 
+  // ── ④½ 发布边界（step-01）：未注册的 provider 在委托前就被拒绝 ──
+  console.log('\n④½ 发布边界（step-01）：未注册的 provider 在委托前就被拒绝')
+  try {
+    await runtime.start('ghost-agent', 'hi', 0)
+    console.log('   ❌ 意外')
+  } catch (error) {
+    console.log(`   ✅ start() reject：${(error as Error).message}（发布前拒绝）`)
+  }
+
   // ── ⑤ 权限快照 + persona 闭环（step-03/05）──
   console.log('\n⑤ 权限快照 + persona 闭环（step-03/05）')
   const permId = await runtime.start(
@@ -110,6 +120,7 @@ async function main(): Promise<void> {
   console.log('\n⑦ report 回传 + 越级汇报（step-08）')
   runtime.report(forkId, ROOT, `周报总结：${forkOutput}`)
   runtime.report(spawnId, ROOT, `调研结论：${spawnOutput}`)
+  console.log('   → scope-local：report 只有 continuable child 可见（step-08），one-shot 不可见')
   const rootInbox = runtime.inbox(ROOT)
   console.log(
     `   📥 root 收件箱 ${rootInbox.length} 条：${rootInbox.map(s => clip(s, 30)).join(' | ')}`,
