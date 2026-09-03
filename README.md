@@ -8,13 +8,14 @@ DeepSeek Harness（v0.1.0-rc.5，2026-08-13 开源，MIT）是 DeepSeek 官方�
 
 ## 📖 文章列表
 
-| 篇目                 | 内容                                                                                                                                     | 飞书完整版（含渲染图）                                            | 本地 Markdown                                                      |
-| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------------------ |
-| 第一篇：Agent 主循环 | turn/step 双层循环、消息注入、max-tokens 粘性、工具并发调度、Phase 状态机                                                                | [飞书文档](https://my.feishu.cn/docx/BmMsdkoDCoId9rxFSaAcOUEhngb) | [docs/dsh-agent-loop-analysis.md](docs/dsh-agent-loop-analysis.md) |
-| 第二篇：工具调用管线 | 六段执行管线、参数物化、单调守卫、取消体系、并行/独占调度                                                                                | [飞书文档](https://my.feishu.cn/docx/BCryd1dmDouDjbxHbdLcLAWUnUd) | [docs/dsh-tools-analysis.md](docs/dsh-tools-analysis.md)           |
-| 第三篇：记忆管理     | 事件日志、surface 投影、压力检测、checkpoint 压缩、KV cache 复用                                                                         | [飞书文档](https://my.feishu.cn/docx/TfeGdEouco5KmMxeT7ocmEctnyd) | [docs/dsh-memory-analysis.md](docs/dsh-memory-analysis.md)         |
-| 第四篇：上下文管理   | SystemPrompt 注册表、快照投影（变了才说）、四类上下文插件、装配纪律                                                                      | [飞书文档](https://my.feishu.cn/docx/MVeZd2Ttso3qmqxUPq7c9RQDnzc) | [docs/dsh-context-analysis.md](docs/dsh-context-analysis.md)       |
-| 第五篇：LLM 层       | 统一流式 chunk 词汇表、BlockAssembler 容错组装、不可变消息溯源、适配器注册表与 waterfall、调用配置解析、错误归一化、重试策略、token 估算 | TODO                                                              | [docs/dsh-llm-analysis.md](docs/dsh-llm-analysis.md)               |
+| 篇目                 | 内容                                                                                                                                        | 飞书完整版（含渲染图）                                            | 本地 Markdown                                                      |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------------------ |
+| 第一篇：Agent 主循环 | turn/step 双层循环、消息注入、max-tokens 粘性、工具并发调度、Phase 状态机                                                                   | [飞书文档](https://my.feishu.cn/docx/BmMsdkoDCoId9rxFSaAcOUEhngb) | [docs/dsh-agent-loop-analysis.md](docs/dsh-agent-loop-analysis.md) |
+| 第二篇：工具调用管线 | 六段执行管线、参数物化、单调守卫、取消体系、并行/独占调度                                                                                   | [飞书文档](https://my.feishu.cn/docx/BCryd1dmDouDjbxHbdLcLAWUnUd) | [docs/dsh-tools-analysis.md](docs/dsh-tools-analysis.md)           |
+| 第三篇：记忆管理     | 事件日志、surface 投影、压力检测、checkpoint 压缩、KV cache 复用                                                                            | [飞书文档](https://my.feishu.cn/docx/TfeGdEouco5KmMxeT7ocmEctnyd) | [docs/dsh-memory-analysis.md](docs/dsh-memory-analysis.md)         |
+| 第四篇：上下文管理   | SystemPrompt 注册表、快照投影（变了才说）、四类上下文插件、装配纪律                                                                         | [飞书文档](https://my.feishu.cn/docx/MVeZd2Ttso3qmqxUPq7c9RQDnzc) | [docs/dsh-context-analysis.md](docs/dsh-context-analysis.md)       |
+| 第五篇：LLM 层       | 统一流式 chunk 词汇表、BlockAssembler 容错组装、不可变消息溯源、适配器注册表与 waterfall、调用配置解析、错误归一化、重试策略、token 估算    | TODO                                                              | [docs/dsh-llm-analysis.md](docs/dsh-llm-analysis.md)               |
+| 第六篇：子代理编排   | provider 注册表与发布边界、spawn/fork 上下文哲学、能力声明 fail loud、委托深度预算、权限快照、生命周期事件、continuable 续对话、report 回传 | TODO                                                              | [docs/dsh-subagent-analysis.md](docs/dsh-subagent-analysis.md)     |
 
 > 飞书版含完整渲染的主循环全景图（mermaid），建议优先阅读。
 
@@ -81,6 +82,19 @@ DeepSeek Harness（v0.1.0-rc.5，2026-08-13 开源，MIT）是 DeepSeek 官方�
 | Step 06 | [step-06-failure-normalization.ts](articles/dsh-llm/src/steps/step-06-failure-normalization.ts)     | **错误归一化**：任意 throw → 结构化 failure → 终态 finish chunk       | `pnpm run llm:step:06` |
 | Step 07 | [step-07-retry-policy.ts](articles/dsh-llm/src/steps/step-07-retry-policy.ts)                       | **重试策略**：normal/always 两模式 + 指数退避 jitter + 事件日志计数   | `pnpm run llm:step:07` |
 | Step 08 | [step-08-token-meter.ts](articles/dsh-llm/src/steps/step-08-token-meter.ts)                         | **token 估算**：固定密度启发式 + 嵌套 tool-result 递归估算            | `pnpm run llm:step:08` |
+
+> 📖 **精读六《子代理编排》配套复现**（`articles/dsh-subagent/`）：8 步渐进，从 provider 注册表一路拼到 report 回传总装（机制自实现 + child 真实 LLM）：
+
+| 步骤    | 文件名                                                                                             | 学到什么                                                                       | 跑法                        |
+| ------- | -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ | --------------------------- |
+| Step 01 | [step-01-provider-registry.ts](articles/dsh-subagent/src/steps/step-01-provider-registry.ts)       | **注册表 + 发布边界**：可插拔 provider；发布前 reject、发布后 result 结算      | `pnpm run subagent:step:01` |
+| Step 02 | [step-02-spawn-vs-fork.ts](articles/dsh-subagent/src/steps/step-02-spawn-vs-fork.ts)               | **spawn vs fork**：fresh vs 继承已完成 turn 前缀（截到最后一个 turn/end）      | `pnpm run subagent:step:02` |
+| Step 03 | [step-03-capabilities.ts](articles/dsh-subagent/src/steps/step-03-capabilities.ts)                 | **能力声明 + fail loud**：不支持就提前拒绝，绝不接受后忽略                     | `pnpm run subagent:step:03` |
+| Step 04 | [step-04-max-depth.ts](articles/dsh-subagent/src/steps/step-04-max-depth.ts)                       | **委托深度预算**：max(header, options) 单调下限，超限不发布，非法参数全拒      | `pnpm run subagent:step:04` |
+| Step 05 | [step-05-delegated-permission.ts](articles/dsh-subagent/src/steps/step-05-delegated-permission.ts) | **权限快照**：委托边界钉死 approval='never'，越权确定性拒绝 + delegation 声明  | `pnpm run subagent:step:05` |
+| Step 06 | [step-06-lifecycle-events.ts](articles/dsh-subagent/src/steps/step-06-lifecycle-events.ts)         | **生命周期可观测**：同 runId 的 start/end 事件对、provider 镜像、listener 隔离 | `pnpm run subagent:step:06` |
+| Step 07 | [step-07-continuable.ts](articles/dsh-subagent/src/steps/step-07-continuable.ts)                   | **可持续对话**：Session/Activation 分离 + 单一 FIFO inbox + cold resume 授权   | `pnpm run subagent:step:07` |
+| Step 08 | [step-08-report-and-assembly.ts](articles/dsh-subagent/src/steps/step-08-report-and-assembly.ts)   | **report 回传 + 总装**：scope-local 工具、单边投递、越级拒绝、双 child 并行    | `pnpm run subagent:step:08` |
 
 每个步骤文件顶部都有「学习目标」+「对应源码位置」，跑完一步看输出，再进下一步——这就是从 0 理解主循环的路径。
 
